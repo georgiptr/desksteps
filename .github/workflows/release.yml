@@ -1,0 +1,50 @@
+name: Build draft release
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --component llvm-tools
+          rustup default stable
+      - name: Hardware-free verification
+        run: cargo xtask quality --headless
+      - name: Install pinned packaging compiler and build packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile "$env:RUNNER_TEMP\inno.exe"
+          if ((Get-FileHash "$env:RUNNER_TEMP\inno.exe" -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw 'Compiler checksum mismatch' }
+          if ((Get-AuthenticodeSignature "$env:RUNNER_TEMP\inno.exe").Status -ne 'Valid') { throw 'Compiler signature invalid' }
+          $setup=Start-Process "$env:RUNNER_TEMP\inno.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER',"/DIR=$env:RUNNER_TEMP\Inno",'/TASKS=','/NOICONS' -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Compiler setup failed' }
+          cargo xtask package -Iscc "$env:RUNNER_TEMP\Inno\ISCC.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DeskSteps-windows-x64
+          path: dist/*
+          retention-days: 7
+      - name: Publish packages only for a matching version tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $version=(cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'desksteps' | Select-Object -ExpandProperty version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and Cargo version differ' }
+          gh release view "$env:GITHUB_REF_NAME" --json id *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:GITHUB_REF_NAME" dist/* --clobber
+          } else {
+            gh release create "$env:GITHUB_REF_NAME" dist/* --draft --verify-tag --title "DeskSteps $version" --notes 'Unsigned Windows 11 x64 release. Z1 only. See README and verification notes; physical testing is separate.'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release package upload failed' }

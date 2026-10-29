@@ -1,0 +1,26 @@
+/target/
+/dist/
+/.tools/
+/data/
+/logs/
+/exports/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.profraw
+*.profdata
+*.pdb
+*.apk
+*.xapk
+*.apks
+.env
+.env.*
+credentials*.json
+token*.json
+
+# Private contributor instructions and local assistant settings.
+/.local/
+/AGENTS.override.md
+/CLAUDE.local.md
+/.claude/settings.local.json
