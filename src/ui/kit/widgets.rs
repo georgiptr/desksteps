@@ -280,9 +280,11 @@ pub fn tile(p: &Painter, th: &Theme, r: Rect, t: &TileText, compact: bool) {
 }
 /// Label on the left, value on the right, hairline below.
 pub fn list_row(p: &Painter, th: &Theme, r: Rect, label: &str, value: &str, divider: bool) {
+    // The label keeps roughly its own width (14 px body text); the value gets the rest.
+    let label_w = (label.chars().count() as f32 * 7.5 + 16.0).min(r.w * 0.45);
     let (left, right) = r
         .inset_xy(12.0, 0.0)
-        .split_right((r.w * 0.55).min(r.w - 24.0));
+        .split_right((r.w - 24.0 - label_w).max(0.0));
     p.text(left, label, TextStyle::Body, th.text, Align::Start);
     p.text(right, value, TextStyle::Body, th.text_secondary, Align::End);
     if divider {

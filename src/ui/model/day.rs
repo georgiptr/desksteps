@@ -477,6 +477,10 @@ impl HistoryView {
             .collect();
         Self { bars, rows }
     }
+    /// Drops list rows without steps; the chart keeps every day.
+    pub fn hide_empty_days(&mut self) {
+        self.rows.retain(|r| r.steps != "0");
+    }
 }
 
 #[cfg(test)]

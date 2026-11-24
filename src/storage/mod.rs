@@ -10,6 +10,8 @@ pub struct Store {
     pub(crate) conn: Connection,
     pub(crate) timezone: Tz,
     pub(crate) ownership: Option<crate::database_ownership::DatabaseOwnership>,
+    /// Local day whose compaction has already been attempted by this process.
+    pub(crate) compacted_for: Option<chrono::NaiveDate>,
 }
 
 pub(crate) use crate::event::Event;
@@ -21,6 +23,7 @@ pub struct Totals {
     pub samples: i64,
 }
 
+pub(crate) mod compaction;
 mod pad_calories;
 mod queries;
 mod recording;

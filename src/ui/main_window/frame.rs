@@ -203,7 +203,7 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 }
 pub fn tooltip_text(id: Id, card: &LiveCard, collapsed: bool) -> Option<String> {
     match id {
-        START => Some(crate::ui::model::live::START_HINT.into()),
+        START => Some(card.start_hint.clone()),
         PAUSE => Some("Pause the belt. Available whenever controls are available.".into()),
         MINUS => Some(format!(
             "Decrease selected speed ({} km/h)",

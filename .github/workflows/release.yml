@@ -41,10 +41,12 @@ jobs:
           $ErrorActionPreference='Stop'
           $version=(cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'desksteps' | Select-Object -ExpandProperty version
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and Cargo version differ' }
+          $assets=@(Get-ChildItem dist -File | Where-Object Extension -in '.exe','.zip' | ForEach-Object FullName)
+          if ($assets.Count -ne 2) { throw 'Expected one installer and one ZIP' }
           gh release view "$env:GITHUB_REF_NAME" --json id *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:GITHUB_REF_NAME" dist/* --clobber
+            gh release upload "$env:GITHUB_REF_NAME" @assets --clobber
           } else {
-            gh release create "$env:GITHUB_REF_NAME" dist/* --draft --verify-tag --title "DeskSteps $version" --notes 'Unsigned Windows 11 x64 release. Z1 only. See README and verification notes; physical testing is separate.'
+            gh release create "$env:GITHUB_REF_NAME" @assets --draft --verify-tag --title "DeskSteps $version" --notes 'Unsigned Windows 11 x64 release. Z1 only. See README and verification notes; physical testing is separate.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'Release package upload failed' }

@@ -74,6 +74,7 @@ impl Runtime<'_> {
             v.connected = self.link.is_some();
             v.generation = self.connection.generation;
             v.increment = self.controls.increment;
+            v.start_speed = self.controls.start_speed;
             v.fresh_speed = self.link.as_ref().and_then(|l| {
                 control::current_speed(self.controls.fresh_speed, l.generation, self.mono_now())
             });

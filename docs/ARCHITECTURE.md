@@ -122,13 +122,19 @@ Projection helpers receive the existing transaction and cannot commit it.
 `accounting::decide` performs no I/O. Session rules call an explicit projection
 sink: the SQLite implementation returns actual database-generated session IDs,
 and tests use an in-memory scripted sink. This avoids predicting IDs or opening
-nested transactions. The schema, version, stored quality labels, serialized
+nested transactions. The schema, version (until the first history compaction), stored quality labels, serialized
 anchors and original raw bytes are preserved.
 
 Raw totals and dashboard totals deliberately have different diagnostic-run
 exclusion rules. Do not merge their similar SQL without preserving that
 difference. Dashboard reads currently perform the existing session-expiration
 maintenance; changing this behavior is separate from moving query code.
+
+`storage::compaction` turns closed days into `day_summaries`/`session_summaries`
+rows. Read models choose the summary for a compacted day and the detail queries
+otherwise; both produce the same preference-independent figures, and weight is
+applied afterwards. `Store::compact` runs from the worker at launch and from the
+60-second recording check, at most once per local day.
 
 ## Native lifetime rules
 

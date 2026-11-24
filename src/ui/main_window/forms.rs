@@ -286,8 +286,9 @@ pub fn fill(s: &State, view: &crate::application::View, screen: Screen) {
         && let Some(day) = s.today.borrow().as_ref()
     {
         let p = &day.preferences;
+        let pounds = s.form.borrow().pounds.unwrap_or(view.weight_in_pounds);
+        put_text(s, TARGET_FIELDS[0], &targets::weight_text(p.weight, pounds));
         for (id, value) in [
-            (TARGET_FIELDS[0], p.weight),
             (TARGET_FIELDS[1], p.steps.map(|v| v as f64)),
             (TARGET_FIELDS[2], p.minutes),
             (TARGET_FIELDS[3], p.calories),
@@ -316,6 +317,7 @@ pub unsafe fn save_targets(window: HWND, s: &State) {
     let result = targets::check(
         &effective,
         &text(s, TARGET_FIELDS[0]),
+        s.scene.borrow().data.weight_in_pounds,
         &text(s, TARGET_FIELDS[1]),
         &text(s, TARGET_FIELDS[2]),
         &text(s, TARGET_FIELDS[3]),
@@ -352,6 +354,22 @@ pub unsafe fn save_targets(window: HWND, s: &State) {
             s.refresh(window);
         }
     }
+}
+/// Switches the weight unit, converting the number already in the field.
+pub fn set_weight_unit(window: HWND, s: &State, pounds: bool) {
+    if s.scene.borrow().data.weight_in_pounds != pounds {
+        let current = text(s, TARGET_FIELDS[0]);
+        put_text(
+            s,
+            TARGET_FIELDS[0],
+            &targets::convert_text(&current, pounds),
+        );
+        let mut form = s.form.borrow_mut();
+        form.pounds = Some(pounds);
+        form.errors[1] = None;
+    }
+    s.send(Input::WeightInPounds(pounds));
+    s.refresh(window);
 }
 pub unsafe fn save_shortcuts(window: HWND, s: &State) {
     let bindings = SHORTCUT_FIELDS.map(|id| text(s, id));

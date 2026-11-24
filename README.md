@@ -11,15 +11,9 @@
 Get the Windows 11 x64 installer or portable ZIP from the
 [latest release](https://github.com/georgiptr/desksteps/releases/latest).
 
-- **Installer:** download `DeskSteps-1.0.0-windows-x64-setup.exe` and run it.
-- **Portable:** extract `DeskSteps-1.0.0-windows-x64-portable.zip`, then run
-  `desksteps.exe`. Keep the included `data` folder with the app; it stores your history.
-
-Downloads are unsigned. Keep Windows security protections enabled. Release assets
-include `SHA256SUMS.txt` for checking downloaded files.
-
-See the [usage guide](docs/USAGE.md) for setup and controls, and
-[data and backup guidance](docs/DATA.md) before upgrading or moving your history.
+- **Installer:** download the `…-setup.exe` file and run it.
+- **Portable:** extract the `…-portable.zip` file, then run `desksteps.exe`. Keep the
+  included `data` folder with the app; it stores your history.
 
 ## Features
 

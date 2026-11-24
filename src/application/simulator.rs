@@ -15,6 +15,7 @@ pub(crate) enum SimAction {
     TimeoutNext,
     FailWrite,
     NoMotionNext,
+    RemoteStart,
     Malformed,
     ResetCounter,
     PauseFiveMinutes,
@@ -32,6 +33,7 @@ pub(crate) const ACTIONS: &[(SimAction, &str)] = &[
     (SimAction::TimeoutNext, "Drop next response"),
     (SimAction::FailWrite, "Fail next write"),
     (SimAction::NoMotionNext, "Accept without motion"),
+    (SimAction::RemoteStart, "Start from remote (1.0)"),
     (SimAction::Malformed, "Malformed packet"),
     (SimAction::ResetCounter, "Reset step counter"),
     (SimAction::PauseFiveMinutes, "Five-minute pause"),
@@ -85,6 +87,19 @@ impl Simulator {
         self.replies.clear();
         self.raw.clear();
         self.active_fault = Fault::None;
+    }
+    /// The physical remote starts a stopped belt at the pad's own speed with
+    /// no FTMS command from this app.
+    pub fn remote_start(&mut self) {
+        if self.speed == 0.0 {
+            self.speed = 1.0;
+            // Device-observed 3-2-1-0 Training Status countdown, then started.
+            for n in (0x30..=0x33).rev() {
+                self.raw
+                    .push_back((TRAINING_STATUS.into(), vec![3, 0x0e, n, 0, 0, 0]));
+            }
+            self.raw.push_back((MACHINE_STATUS.into(), vec![4]));
+        }
     }
     pub fn write(&mut self, frame: &[u8], now: Instant) -> Result<(), String> {
         let opcode = *frame.first().ok_or("Empty synthetic command")?;

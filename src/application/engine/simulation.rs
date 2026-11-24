@@ -146,6 +146,12 @@ impl Runtime<'_> {
                 SimAction::TimeoutNext => pad.lock().unwrap().fault = simulator::Fault::Timeout,
                 SimAction::FailWrite => pad.lock().unwrap().fault = simulator::Fault::Write,
                 SimAction::NoMotionNext => pad.lock().unwrap().fault = simulator::Fault::NoMotion,
+                SimAction::RemoteStart => {
+                    if self.link.is_none() {
+                        return Err("Connect the synthetic pad first".into());
+                    }
+                    pad.lock().unwrap().remote_start();
+                }
                 SimAction::Malformed => {
                     self.sim_raw(vec![0, 0, 0], protocol::TREADMILL)?;
                 }
@@ -212,6 +218,8 @@ impl Runtime<'_> {
                     v.shortcuts = Default::default();
                     v.theme_preference = Default::default();
                     v.recover_gaps = true;
+                    v.weight_in_pounds = false;
+                    v.hide_empty_days = false;
                     v.dashboard = None;
                     v.error = None;
                     self.controls.increment = 1;
@@ -451,6 +459,147 @@ mod tests {
             r.advance_controls().unwrap();
             assert!(r.controls.exchange.is_some());
             assert_eq!(r.simulator.as_ref().unwrap().lock().unwrap().speed, 0.0);
+        });
+    }
+    fn automatic_writes(runtime: &Runtime<'_>) -> Vec<Vec<u8>> {
+        runtime
+            .store
+            .conn
+            .prepare(
+                "SELECT raw FROM events WHERE kind='control_write' AND detail LIKE 'Automatic start speed%' ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+    fn speed(runtime: &Runtime<'_>) -> f64 {
+        runtime.simulator.as_ref().unwrap().lock().unwrap().speed
+    }
+    fn settle(runtime: &mut Runtime<'_>) {
+        runtime.fast_forward(3).unwrap();
+        exchange(runtime);
+        exchange(runtime);
+    }
+    fn pause(runtime: &mut Runtime<'_>) {
+        control(runtime, control::Command::Pause);
+        for _ in 0..4 {
+            exchange(runtime);
+        }
+        assert_eq!(speed(runtime), 0.0);
+    }
+    #[test]
+    fn start_speed_follows_app_and_remote_starts_once_and_never_on_reconnect() {
+        with_simulator(|r| {
+            use super::super::super::StartSpeed;
+            let set = |r: &mut Runtime<'_>, target, remote| {
+                r.user_command(UserCommand::StartSpeed(StartSpeed { target, remote }))
+                    .unwrap();
+                r.publish().unwrap();
+            };
+            set(r, Some(30), false);
+            assert_eq!(
+                r.store.setting("start_speed").unwrap().as_deref(),
+                Some("30")
+            );
+            assert_eq!(r.view.lock().unwrap().start_speed.target, Some(30));
+            set(r, Some(61), true); // out of range is ignored
+            assert_eq!(r.controls.start_speed.target, Some(30));
+            assert!(!r.controls.start_speed.remote);
+            // App Start: the pad starts at 1.0, then one automatic absolute write.
+            control(r, control::Command::StartResume);
+            exchange(r);
+            assert_eq!(speed(r), 1.0);
+            assert!(automatic_writes(r).is_empty()); // waits for settled motion
+            settle(r);
+            assert_eq!(speed(r), 3.0);
+            assert_eq!(automatic_writes(r), [vec![2, 0x2c, 1]]);
+            settle(r);
+            assert_eq!(automatic_writes(r).len(), 1); // never repeated
+            // Remote start with the override off leaves the pad's speed.
+            pause(r);
+            r.simulator_action(SimAction::RemoteStart).unwrap();
+            settle(r);
+            assert_eq!(speed(r), 1.0);
+            assert_eq!(automatic_writes(r).len(), 1);
+            // With the override on, the remote start is followed once.
+            pause(r);
+            set(r, Some(30), true);
+            assert_eq!(
+                r.store.setting("start_speed_remote").unwrap().as_deref(),
+                Some("true")
+            );
+            r.simulator_action(SimAction::RemoteStart).unwrap();
+            settle(r);
+            assert_eq!(speed(r), 3.0);
+            assert_eq!(automatic_writes(r).len(), 2);
+            // Reconnecting to a moving belt sends nothing.
+            r.simulator.as_ref().unwrap().lock().unwrap().speed = 1.0;
+            r.simulator_action(SimAction::Disconnect).unwrap();
+            r.simulator_action(SimAction::Connect).unwrap();
+            settle(r);
+            assert_eq!(speed(r), 1.0);
+            assert_eq!(automatic_writes(r).len(), 2);
+            // Pad default sends nothing after a remote start.
+            pause(r);
+            set(r, None, true);
+            assert_eq!(
+                r.store.setting("start_speed").unwrap().as_deref(),
+                Some("off")
+            );
+            r.simulator_action(SimAction::RemoteStart).unwrap();
+            settle(r);
+            assert_eq!(speed(r), 1.0);
+            assert_eq!(automatic_writes(r).len(), 2);
+            r.simulator_action(SimAction::Disconnect).unwrap();
+            assert!(r.simulator_action(SimAction::RemoteStart).is_ok()); // reported, not fatal
+            assert_eq!(speed(r), 1.0);
+        });
+    }
+    #[test]
+    fn remote_start_after_silent_idle_uses_countdown_and_started_status() {
+        with_simulator(|r| {
+            r.controls.start_speed = super::super::super::StartSpeed {
+                target: Some(25),
+                remote: true,
+            };
+            // The real pad sent no idle readings: the last stopped one is stale.
+            r.simulator.as_ref().unwrap().lock().unwrap().offset += chrono::Duration::seconds(30);
+            r.simulator_action(SimAction::RemoteStart).unwrap();
+            r.advance_simulator().unwrap(); // countdown and started status
+            exchange(r); // first reading already at 1.0
+            assert!(r.controls.pending_start.is_some());
+            settle(r);
+            assert_eq!(speed(r), 2.5);
+            // No earlier app command on this connection: Request Control first.
+            assert_eq!(automatic_writes(r), [vec![0], vec![2, 0xfa, 0]]);
+        });
+    }
+    #[test]
+    fn uncertain_controls_skip_the_start_speed_without_writing() {
+        with_simulator(|r| {
+            r.controls.start_speed = super::super::super::StartSpeed {
+                target: Some(30),
+                remote: true,
+            };
+            r.simulator_action(SimAction::RemoteStart).unwrap();
+            exchange(r);
+            assert!(r.controls.pending_start.is_some());
+            r.link.as_mut().unwrap().control_uncertain = true;
+            settle(r);
+            assert!(automatic_writes(r).is_empty());
+            assert_eq!(speed(r), 1.0);
+            let skipped: i64 = r
+                .store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE kind='control_skipped'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(skipped, 1);
         });
     }
     #[test]

@@ -69,18 +69,19 @@ pub(super) fn reset(store: &mut Store, now: DateTime<Utc>) -> Result<(), String>
     if store.setting("development_data")?.as_deref() != Some("1") {
         return Err("Reset is allowed only for marked synthetic development storage".into());
     }
-    // The owner confirms this action in the development panel. No automatic
-    // retention/deletion policy is introduced for any diagnostic or real data.
+    // The owner confirms this action in the development panel.
     let tx = store.conn.transaction().map_err(|e| e.to_string())?;
     tx.execute_batch(
         "DELETE FROM pad_calories; DELETE FROM recovery_credits; DELETE FROM recovery_baselines;
         DELETE FROM ui_intervals; DELETE FROM ui_processed; DELETE FROM samples;
         DELETE FROM events; DELETE FROM anchors; DELETE FROM ui_anchors; DELETE FROM ui_sessions;
         DELETE FROM ui_runs; DELETE FROM ui_preferences;
+        DELETE FROM day_summaries; DELETE FROM session_summaries;
         DELETE FROM settings WHERE key != 'timezone' AND key != 'development_data';",
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    store.compacted_for = None;
     initialize(store, now)
 }
 

@@ -11,6 +11,17 @@ impl Store {
             .to_string();
         let timestamp = event.utc.to_rfc3339();
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        // A compacted day is final. Its source keys are gone, so a replayed
+        // capture could otherwise count the same activity twice.
+        let frozen = tx
+            .query_row("SELECT 1 FROM day_summaries WHERE day=?1", [&day], |_| {
+                Ok(())
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if frozen.is_some() {
+            return Ok(false);
+        }
         let inserted = tx.execute("INSERT OR IGNORE INTO events(source_key,device,connection_id,utc,monotonic_ns,kind,uuid,raw,detail,timezone)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![event.key,event.device,event.connection,timestamp,event.monotonic_ns,event.kind,event.uuid,event.raw,event.detail,self.timezone.name()]).map_err(|e| e.to_string())?;
         if inserted == 0 {

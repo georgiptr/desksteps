@@ -23,15 +23,35 @@ pub enum Command {
     Pause,
     Increase,
     Decrease,
+    /// Absolute target in 0.1 km/h units, sent only by the start-speed setting.
+    SetSpeed(u8),
 }
 impl Command {
     pub fn is_speed(self) -> bool {
-        matches!(self, Self::Increase | Self::Decrease)
+        matches!(self, Self::Increase | Self::Decrease | Self::SetSpeed(_))
+    }
+    /// Persisted diagnostic detail for this command's control writes.
+    pub fn write_detail(self) -> &'static str {
+        if matches!(self, Self::SetSpeed(_)) {
+            "Automatic start speed (setting); no automatic retry"
+        } else {
+            "Explicit user command; no automatic retry"
+        }
     }
     pub fn frame(self, speed: Option<f64>, increment: u8) -> Result<Vec<u8>, String> {
         match self {
             Self::StartResume => Ok(vec![7]),
             Self::Pause => Ok(vec![8, 2]),
+            Self::SetSpeed(target) => {
+                if !(10..=60).contains(&target) {
+                    return Err("Start speed must be 1.0–6.0 km/h".into());
+                }
+                speed
+                    .filter(|s| s.is_finite() && (1.0..=6.0).contains(s))
+                    .ok_or("Start speed requires fresh moving telemetry within 1–6 km/h")?;
+                let bytes = (u16::from(target) * 10).to_le_bytes();
+                Ok(vec![2, bytes[0], bytes[1]])
+            }
             Self::Increase | Self::Decrease => {
                 if !(1..=10).contains(&increment) {
                     return Err("Speed increment must be 0.1–1.0 km/h".into());
@@ -234,6 +254,36 @@ mod tests {
         }
         assert_eq!(Command::StartResume.frame(None, 1).unwrap(), [7]);
         assert_eq!(Command::Pause.frame(None, 1).unwrap(), [8, 2]);
+    }
+    #[test]
+    fn absolute_start_speed_encodes_every_tenth_and_needs_moving_telemetry() {
+        for target in 10..=60u8 {
+            let frame = Command::SetSpeed(target).frame(Some(1.0), 1).unwrap();
+            assert_eq!(frame[0], 2);
+            assert_eq!(
+                u16::from_le_bytes([frame[1], frame[2]]),
+                u16::from(target) * 10
+            );
+        }
+        assert_eq!(
+            Command::SetSpeed(30).frame(Some(1.0), 1).unwrap(),
+            [2, 0x2c, 1]
+        );
+        for target in [0, 9, 61, 255] {
+            assert!(Command::SetSpeed(target).frame(Some(1.0), 1).is_err());
+        }
+        for speed in [None, Some(0.0), Some(f64::NAN), Some(6.1)] {
+            assert!(Command::SetSpeed(30).frame(speed, 1).is_err());
+        }
+        assert!(Command::SetSpeed(30).is_speed());
+        assert!(
+            Command::SetSpeed(30)
+                .write_detail()
+                .starts_with("Automatic")
+        );
+        assert!(Command::Increase.write_detail().starts_with("Explicit"));
+        let t = Transaction::new(Command::SetSpeed(30), Some(1.0), 1, 1, 0).unwrap();
+        assert_eq!(t.target(), Some(3.0));
     }
     #[test]
     fn transaction_requires_access_reply_and_new_matching_telemetry() {

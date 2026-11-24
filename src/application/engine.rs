@@ -58,6 +58,9 @@ pub(super) fn work(
             .as_ref()
             .map(|s| s.lock().unwrap().offset)
             .unwrap_or_default();
+    // Closed days are compacted at launch and at each local midnight; a failure
+    // is saved in settings, keeps all detail and never blocks recording.
+    let _ = store.compact(initial_utc);
     let origin = Instant::now();
     let process = Utc::now().timestamp_nanos_opt().unwrap().to_string();
     store.record(
@@ -106,7 +109,14 @@ pub(super) fn work(
         .filter(|n| (1..=10).contains(n))
         .unwrap_or(1);
     load_preferences(&store, &mut view.lock().unwrap())?;
-    let controls = super::controls::Controls::<WindowsWrite>::new(increment);
+    let mut controls = super::controls::Controls::<WindowsWrite>::new(increment);
+    controls.start_speed = super::controls::StartSpeed {
+        target: store
+            .setting("start_speed")?
+            .and_then(|s| s.parse::<u8>().ok())
+            .filter(|n| (10..=60).contains(n)),
+        remote: store.setting("start_speed_remote")?.as_deref() == Some("true"),
+    };
     let dashboard_request: Option<crate::statistics::Request> = None;
     let next_dashboard = Instant::now();
     let next_session_check = Instant::now();
@@ -165,6 +175,8 @@ fn load_preferences(store: &Store, view: &mut View) -> Result<(), String> {
     view.development_shortcuts =
         view.development && store.setting("development_shortcuts")?.as_deref() == Some("true");
     view.recover_gaps = store.setting("recover_gaps")?.as_deref() != Some("false");
+    view.weight_in_pounds = store.setting("weight_unit")?.as_deref() == Some("lb");
+    view.hide_empty_days = store.setting("hide_empty_days")?.as_deref() == Some("true");
     view.theme_preference =
         crate::appearance::ThemePreference::from_setting(store.setting("theme")?.as_deref());
     Ok(())

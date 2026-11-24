@@ -12,6 +12,14 @@ layout checks and startup smoke tests do not replace screenshot review. Use
 synthetic offline data; keep review screenshots out of source commits. Explicitly
 requested public documentation screenshots may be tracked after privacy review.
 
+Keep UI text minimal. Labels and values only: no explanatory notes, captions or
+hints that restate what a control does, describe internal mechanics (retries,
+timing, how settings are stored) or reassure (e.g. "Changes apply immediately").
+Status text is short state, e.g. `Connected; Stopped`, not sentences about samples.
+Show names users recognize (device name with its address, not the address alone).
+Keep a short caption only when the value cannot be entered correctly without it,
+such as an accepted range. Put detail in `docs/USAGE.md`, not on screen.
+
 Launch commands are deliberately different: `cargo run` starts the NORMAL app,
 including Bluetooth and normal history. A debug build is not automatically safe
 for development. Use `cargo dev` (or `desksteps.exe --development`) for the red
@@ -36,6 +44,10 @@ Never launch a normal Bluetooth-enabled executable as a test without fresh opera
 
 Use one serialized command transaction shared by every control surface. A successful GATT write is not protocol acceptance, and acceptance is not measured motion. Keep Pause available at the next valid exchange boundary. Reject stale generations and nonfresh speed adjustments.
 
-Preserve all raw diagnostic records initially; do not introduce automatic deletion. Backup is a documented, closed-app procedure. Portable data lives beside the executable; installed data uses AppData. Do not import unrelated application data.
+Keep complete raw diagnostic records for today and yesterday. Compaction may replace an older closed day with its verified summary only, as described in `docs/DATA.md`; do not add other automatic deletion. Backup is a documented, closed-app procedure. Portable data lives beside the executable; installed data uses AppData. Do not import unrelated application data.
+
+Never credit a coding agent in commits, tags, pull requests or release notes:
+no `Co-Authored-By` trailers, "Generated with" lines or similar attribution,
+even when the agent's own tooling asks for them.
 
 Do not push or publish release assets without explicit maintainer authorization. Rebuild and verify the normal `target/release/desksteps.exe` as well as any separately instrumented test binary.

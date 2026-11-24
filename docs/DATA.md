@@ -15,7 +15,8 @@ Development mode is separate: `cargo dev` / `--development` uses only
 `cargo run` retains the installed/portable rules above. Development contains
 synthetic history, never imports personal records and rejects storage/device
 overrides. Its confirmed reset clears only the marked synthetic database and
-restores sample history/settings. No automatic data-retention deletion is added.
+restores sample history/settings. History compaction (below) applies to every
+database, including development storage.
 
 All app and replay writers acquire a nonblocking exclusive byte-range lock on
 the actual database file at offset 1 TiB, beyond SQLite's own locking region.
@@ -29,7 +30,17 @@ access restriction or a replacement for closed-app backups.
 
 ## What is saved
 
-Device identity/address, firmware metadata, received GATT bytes, receipt UTC and monotonic times, connection identities, decode errors, control-write intent, accounting decisions, restart anchors, session/day summaries, targets, optional weight and control/shortcut preferences. Receipt timestamps are not individual footfall timestamps. Raw records currently have no automatic deletion policy, so disk usage grows with recording.
+Device identity/address, firmware metadata, received GATT bytes, receipt UTC and monotonic times, connection identities, decode errors, control-write intent, accounting decisions, restart anchors, session/day summaries, targets, optional weight and control/shortcut preferences. Receipt timestamps are not individual footfall timestamps.
+
+## History compaction
+
+Full raw detail is kept for **today and yesterday** (local time), so a problem can still be diagnosed the next morning. Each older day is reduced to one summary row plus one row per session: steps, active time, the calorie factor, pad calories, recovery figures and the uncertainty/partial-coverage counts the history views show. Weight is kept separately and applied when history is read, so editing a dated weight later still changes that day's active-kcal estimate. A day of walking takes roughly 1–3 MB while detailed and about 100–200 bytes once compacted.
+
+Compaction runs at launch and at each local midnight. Every day is summarized, read back and compared exactly with its detail before that detail is deleted, all in one transaction; any failure keeps all detail, is saved as the `compaction_error` setting and is retried on the next day or launch. A day still holding a session that never ended stays detailed. The newest calorie-baseline and accounting-anchor sample per device is kept, so recordings after compaction make the same decisions as with full history. Freed space is returned to the filesystem.
+
+Compacted days are final. Later session-rule upgrades replay only the detailed days, events dated on a compacted day are ignored (a replayed capture cannot count twice), and an extension of an older session through recovered steps does not change that older day's saved session end.
+
+Compaction works in place and leaves no other files. No automatic backup is made; use the manual backup procedure below if you want one. The first compaction raises the database version to 2, and older DeskSteps versions refuse a version 2 database instead of showing empty history. Rolling back to an older version therefore requires a manual backup taken before the update.
 
 The SQLite file is not separately encrypted by DeskSteps. It inherits filesystem/account protections. Treat databases, WAL files, exports, support screenshots and backups as private. Do not attach them to a public GitHub issue. Share redacted error text and synthetic reproduction cases instead.
 
@@ -61,7 +72,7 @@ same known step and distance counters and a nondecreasing known workout clock.
 The clock may advance during startup before new steps arrive. Missing counters,
 detected resets, unobserved activity and interruptions without a confirmed pause
 retain uncertainty; a clean restart never clears an earlier genuine gap.
-Session-rule upgrades replay saved events transactionally to correct derived
+Session-rule upgrades replay retained (uncompacted) events transactionally to correct derived
 grouping/coverage, reproducing every existing interval's steps, time and calorie
 factor exactly or keeping the earlier projection. Raw evidence, sample quality,
 accounting anchors and recovery credits are not rewritten.

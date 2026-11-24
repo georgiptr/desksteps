@@ -64,6 +64,21 @@ impl Runtime<'_> {
                     self.controls.increment = value;
                 }
             }
+            UserCommand::StartSpeed(value) => {
+                if value.target.is_some_and(|t| !(10..=60).contains(&t)) {
+                    return Ok(true); // ignored like an out-of-range speed step
+                }
+                let target = value.target.map_or("off".into(), |t| t.to_string());
+                self.store.set_setting("start_speed", &target)?;
+                self.store.set_setting(
+                    "start_speed_remote",
+                    if value.remote { "true" } else { "false" },
+                )?;
+                self.controls.start_speed = value;
+                if value.target.is_none() {
+                    self.controls.pending_start = None;
+                }
+            }
             UserCommand::Shortcuts(value) => match value.validate() {
                 Ok(()) => {
                     self.store.set_setting(
@@ -90,12 +105,13 @@ impl Runtime<'_> {
                         command,
                         requested_generation,
                         self.link.as_ref().map(|l| l.generation),
-                        self.options.controls_enabled
-                            && (!self.options.no_bluetooth || self.options.development),
+                        self.controls_enabled(),
                         self.link.as_ref().is_some_and(|l| l.control_uncertain),
                         self.mono_now(),
                     )?;
                     if command.is_speed() {
+                        // An explicit click replaces any start speed not yet sent.
+                        self.controls.pending_start = None;
                         self.controls.queue_speed(transaction, self.mono_now())?;
                     } else {
                         self.controls.discard_speeds();
@@ -149,6 +165,16 @@ impl Runtime<'_> {
                 self.store
                     .set_setting("recover_gaps", if enabled { "true" } else { "false" })?;
                 self.view.lock().unwrap().recover_gaps = enabled;
+            }
+            UserCommand::WeightInPounds(enabled) => {
+                self.store
+                    .set_setting("weight_unit", if enabled { "lb" } else { "kg" })?;
+                self.view.lock().unwrap().weight_in_pounds = enabled;
+            }
+            UserCommand::HideEmptyDays(enabled) => {
+                self.store
+                    .set_setting("hide_empty_days", if enabled { "true" } else { "false" })?;
+                self.view.lock().unwrap().hide_empty_days = enabled;
             }
             UserCommand::Disconnect if self.options.development => {
                 self.simulator_action(SimAction::Disconnect)?;

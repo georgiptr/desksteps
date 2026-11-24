@@ -12,9 +12,14 @@ wrapping and overlap; a passing export test does not establish visual correctnes
 Extend the capture cases when another screen is affected. Keep review captures
 untracked; public documentation images require explicit authorization and
 synthetic data. For the README's four main pages and compact remote, run
-`cargo test --lib --locked --offline native_ui_screenshots_for_readme -- --ignored --nocapture`.
-It exports BMPs to `target/readme-screenshots/` for review and conversion to PNG
-in `docs/screenshots/`. The displayed values are synthetic; no transport runs.
+`cargo xtask screenshots` (add `--offline` for cached dependencies). It runs the
+ignored `native_ui_screenshots_for_readme` test, which exports BMPs (normal and
+narrow) to `target/readme-screenshots/`, then writes the normal-width images to
+`docs/screenshots/` as 256-color PNGs. Flat areas stay exact; only anti-aliased
+edge pixels move slightly, and the command prints each file's size and largest
+channel change. Images are captured at the current monitor's DPI; keep using a
+high-DPI monitor (200% or more) so they stay sharp on high-DPI screens. The
+displayed values are synthetic; no transport runs.
 
 Target display regressions check completed/target values, the centered-dot
 percentage separator, separate remaining lines, exact completion, over-target

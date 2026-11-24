@@ -35,8 +35,11 @@ impl Fixture {
             .output()
             .unwrap()
     }
-    fn report(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.0.join("test.replay-report.json")).unwrap()).unwrap()
+    /// Replay prints its validation counts and leaves no report file.
+    fn report(&self, output: &Output) -> Value {
+        assert!(output.status.success());
+        assert!(!self.0.join("test.replay-report.json").exists());
+        serde_json::from_slice(&output.stdout).unwrap()
     }
     fn connect(&self) -> Connection {
         Connection::open(self.0.join("test.sqlite")).unwrap()
@@ -72,8 +75,10 @@ fn executable_replay_preserves_raw_packets_day_boundaries_resets_and_idempotence
         .map(Value::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(f.run(&source).status.success());
-    assert_eq!(f.report(), json!({"inserted_events":24,"decode_errors":1}));
+    assert_eq!(
+        f.report(&f.run(&source)),
+        json!({"inserted_events":24,"decode_errors":1})
+    );
     {
         let c = f.connect();
         assert_eq!(
@@ -118,8 +123,10 @@ fn executable_replay_preserves_raw_packets_day_boundaries_resets_and_idempotence
             vec![0]
         );
     }
-    assert!(f.run(&source).status.success());
-    assert_eq!(f.report(), json!({"inserted_events":0,"decode_errors":1}));
+    assert_eq!(
+        f.report(&f.run(&source)),
+        json!({"inserted_events":0,"decode_errors":1})
+    );
     assert_eq!(
         f.connect()
             .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
@@ -155,6 +162,8 @@ fn invalid_hex_is_rejected_and_rows_without_timestamps_are_skipped() {
             .unwrap(),
         0
     );
-    assert!(f.run("\n{\"kind\":\"unknown\"}\n").status.success());
-    assert_eq!(f.report(), json!({"inserted_events":0,"decode_errors":0}));
+    assert_eq!(
+        f.report(&f.run("\n{\"kind\":\"unknown\"}\n")),
+        json!({"inserted_events":0,"decode_errors":0})
+    );
 }

@@ -1,6 +1,8 @@
 use super::*;
 #[path = "tests/pad_calories.rs"]
 mod calorie_tests;
+#[path = "tests/compaction.rs"]
+mod compaction;
 #[test]
 fn device_names_survive_reopen_and_stay_associated_with_their_address() {
     let folder = std::env::temp_dir().join(format!(
@@ -232,7 +234,7 @@ fn settings_upsert_and_database_version_guards() {
     s.set_setting("device", "second").unwrap();
     assert_eq!(s.setting("device").unwrap().as_deref(), Some("second"));
     let future = Connection::open_in_memory().unwrap();
-    future.pragma_update(None, "user_version", 2).unwrap();
+    future.pragma_update(None, "user_version", 3).unwrap();
     assert!(
         Store::initialize(future, chrono_tz::UTC)
             .err()

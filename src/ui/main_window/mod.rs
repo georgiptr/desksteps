@@ -44,8 +44,9 @@ use frame::*;
 use pages::{
     AUTO, BACK, BAR_BASE, CANDIDATE_BASE, DATE, DISCONNECT, EFFECTIVE, FIELD_BASE, FOLDER,
     KEEP_RUNNING_ON_CLOSE, MINIMIZE_TO_TRAY, NEXT, PREV, RANGE_BASE, RANGES, RECOVER_GAPS,
-    ROW_BASE, SCAN, SHORTCUTS_SAVE, START_MINIMIZED, STEP_DOWN, STEP_UP, Screen, TARGETS_SAVE,
-    THEME_BASE, TODAY_BUTTON, WINDOWS_STARTUP,
+    REMOTE_START, ROW_BASE, SCAN, SHORTCUTS_SAVE, START_MINIMIZED, START_SPEED_DOWN,
+    START_SPEED_UP, STEP_DOWN, STEP_UP, Screen, TARGETS_SAVE, THEME_BASE, TODAY_BUTTON,
+    WINDOWS_STARTUP,
 };
 use scene::{Context, Scene};
 
@@ -563,6 +564,13 @@ unsafe fn activate(window: HWND, s: &State, id: Id, by_key: bool) {
             s.send(Input::RecoverGaps(!s.scene.borrow().data.recover_gaps));
             return;
         }
+        pages::WEIGHT_KG | pages::WEIGHT_LB => {
+            return forms::set_weight_unit(window, s, id == pages::WEIGHT_LB);
+        }
+        pages::HIDE_EMPTY_DAYS => {
+            s.send(Input::HideEmptyDays(!s.scene.borrow().data.hide_empty_days));
+            return;
+        }
         x if (THEME_BASE..THEME_BASE + 3).contains(&x) => {
             s.send(Input::Theme(
                 crate::appearance::ThemePreference::ALL[(x - THEME_BASE) as usize],
@@ -572,6 +580,28 @@ unsafe fn activate(window: HWND, s: &State, id: Id, by_key: bool) {
         SCAN => return tray_command(s, TRAY_FIND),
         DISCONNECT => return tray_command(s, TRAY_DISCONNECT),
         FOLDER => return tray_command(s, crate::ui::tray::OPEN_DATA_FOLDER),
+        START_SPEED_DOWN | START_SPEED_UP => {
+            let now = s.scene.borrow().data.start_speed;
+            let target = pages::next_start_speed(now.target, id == START_SPEED_UP);
+            if target != now.target {
+                s.send(Input::StartSpeed(crate::application::StartSpeed {
+                    target,
+                    ..now
+                }));
+            }
+            invalidate(window);
+            return;
+        }
+        REMOTE_START => {
+            let now = s.scene.borrow().data.start_speed;
+            if now.target.is_some() {
+                s.send(Input::StartSpeed(crate::application::StartSpeed {
+                    remote: !now.remote,
+                    ..now
+                }));
+            }
+            return;
+        }
         STEP_DOWN | STEP_UP => {
             let now = s.scene.borrow().data.increment as i32;
             let next = (now + if id == STEP_UP { 1 } else { -1 }).clamp(1, 10);
@@ -1745,6 +1775,35 @@ mod tests {
             assert!(matches!(rx.recv().unwrap(), Input::Increment(2)));
             activate(window, s, STEP_DOWN, false);
             // Already at the lowest step in this fixture: nothing is sent.
+            // Start speed: Pad default cannot go lower or enable the remote option.
+            activate(window, s, START_SPEED_DOWN, false);
+            activate(window, s, REMOTE_START, false);
+            activate(window, s, START_SPEED_UP, false);
+            assert!(matches!(
+                rx.recv().unwrap(),
+                Input::StartSpeed(crate::application::StartSpeed {
+                    target: Some(10),
+                    remote: false
+                })
+            ));
+            raw.lock().unwrap().start_speed.target = Some(30);
+            SendMessageW(window, UPDATE, None, None);
+            activate(window, s, START_SPEED_DOWN, false);
+            assert!(matches!(
+                rx.recv().unwrap(),
+                Input::StartSpeed(crate::application::StartSpeed {
+                    target: Some(29),
+                    remote: false
+                })
+            ));
+            activate(window, s, REMOTE_START, false);
+            assert!(matches!(
+                rx.recv().unwrap(),
+                Input::StartSpeed(crate::application::StartSpeed {
+                    target: Some(30),
+                    remote: true
+                })
+            ));
             // Device buttons are tray commands: they reach the owner, never the worker.
             for id in [AUTO, SCAN, CANDIDATE_BASE] {
                 activate(window, s, id, false);

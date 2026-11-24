@@ -16,7 +16,7 @@ impl Runtime<'_> {
                 kind: "control_write",
                 uuid: control::UUID,
                 raw: transaction.bytes(),
-                detail: "Explicit user command; no automatic retry",
+                detail: transaction.command().write_detail(),
             },
             None,
         )?;
@@ -57,6 +57,51 @@ impl Runtime<'_> {
                 uuid: control::UUID,
                 raw: &[],
                 detail: &error,
+            },
+            None,
+        )?;
+        Ok(())
+    }
+    /// Movement surfaces are enabled in this mode (normal Bluetooth or simulator).
+    pub(super) fn controls_enabled(&self) -> bool {
+        self.options.controls_enabled && (!self.options.no_bluetooth || self.options.development)
+    }
+    /// Queue the one automatic start-speed write. A skipped start speed is
+    /// recorded but does not mark controls uncertain: nothing was written.
+    fn advance_start_speed(&mut self, now_ns: i64) -> Result<(), String> {
+        if self.controls.pending_start.is_some()
+            && (!self.controls_enabled() || self.link.as_ref().is_none_or(|l| l.control_uncertain))
+        {
+            self.controls.pending_start = None;
+            return self.control_note("Start speed not sent: controls unavailable or uncertain");
+        }
+        match self
+            .controls
+            .take_start(self.link.as_ref().map(|l| l.generation), now_ns)
+        {
+            Ok(Some(transaction)) => {
+                if let Err(error) = self.controls.queue_speed(transaction, now_ns) {
+                    self.control_note(&error)?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.control_note(&error)?,
+        }
+        Ok(())
+    }
+    fn control_note(&mut self, detail: &str) -> Result<(), String> {
+        self.sequence += 1;
+        self.store.record(
+            Event {
+                key: &format!("{}:{}", self.process, self.sequence),
+                device: &self.connection.target.map(address).unwrap_or_default(),
+                connection: &format!("{}:{}", self.process, self.connection.generation),
+                utc: self.utc_now(),
+                monotonic_ns: Some(self.mono_now()),
+                kind: "control_skipped",
+                uuid: control::UUID,
+                raw: &[],
+                detail,
             },
             None,
         )?;
@@ -123,7 +168,7 @@ impl Runtime<'_> {
                                 kind: "control_write",
                                 uuid: control::UUID,
                                 raw: &frame,
-                                detail: "Explicit user command; no automatic retry",
+                                detail: pending.transaction.command().write_detail(),
                             },
                             None,
                         )?;
@@ -170,6 +215,7 @@ impl Runtime<'_> {
                 generation,
             })?;
         }
+        self.advance_start_speed(now_ns)?;
         match self
             .controls
             .next_speed(self.link.as_ref().map(|l| l.generation), now_ns)

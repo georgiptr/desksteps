@@ -19,9 +19,15 @@ pub struct LiveCard {
     pub steps: String,
     pub target_fraction: Option<f32>,
     pub footer_error: Option<String>,
+    pub start_hint: String,
 }
-pub const START_HINT: &str =
-    "Start/Resume uses the speed selected by the pad. Pause retains workout counters.";
+/// What Start/Resume does under the current start-speed setting.
+pub fn start_hint(start_speed: crate::application::StartSpeed) -> String {
+    match start_speed.target {
+        None => "Start/Resume uses the speed selected by the pad.".into(),
+        Some(t) => format!("Start/Resume then sets {:.1} km/h.", f64::from(t) / 10.0),
+    }
+}
 
 pub fn group_digits(value: i64) -> String {
     let digits = value.unsigned_abs().to_string();
@@ -99,6 +105,7 @@ impl LiveCard {
             },
             target_fraction: target.map(|t| (steps as f64 / t as f64).clamp(0.0, 1.0) as f32),
             footer_error: v.error.clone(),
+            start_hint: start_hint(v.start_speed),
         }
     }
 }
@@ -323,6 +330,25 @@ mod tests {
             None,
         );
         assert!(c.speed_caption.contains("simulated"));
+    }
+    #[test]
+    fn start_hint_follows_the_start_speed_setting() {
+        let c = LiveCard::from_view(&ready(), None);
+        assert_eq!(
+            c.start_hint,
+            "Start/Resume uses the speed selected by the pad."
+        );
+        let c = LiveCard::from_view(
+            &View {
+                start_speed: crate::application::StartSpeed {
+                    target: Some(32),
+                    remote: false,
+                },
+                ..ready()
+            },
+            None,
+        );
+        assert!(c.start_hint.starts_with("Start/Resume then sets 3.2 km/h"));
     }
     #[test]
     fn step_labels_follow_the_increment() {

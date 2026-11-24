@@ -135,7 +135,8 @@ struct Replayed {
     credit: Option<(i64, i64, Option<f64>)>,
 }
 impl Store {
-    /// Replays processed events through the current session rules. Only session
+    /// Replays retained events through the current session rules; compacted days
+    /// keep their saved summaries. Only session
     /// grouping/coverage may change: every stored interval must be reproduced exactly or
     /// the rebuild rolls back and the earlier projection stays in place.
     pub(crate) fn rebuild_sessions(&mut self) -> Result<(), String> {
@@ -159,7 +160,8 @@ impl Store {
             .prepare("SELECT e.id,e.source_key,e.device,e.connection_id,e.monotonic_ns,e.utc,e.kind,e.uuid,e.raw,e.detail,p.excluded,
                 s.decoded,s.step_delta,s.quality,s.local_day,r.steps,r.active_ms,r.factor,s.event_id IS NOT NULL,r.event_id IS NOT NULL
                 FROM events e JOIN ui_processed p ON p.event_id=e.id LEFT JOIN samples s ON s.event_id=e.id
-                LEFT JOIN recovery_credits r ON r.event_id=e.id ORDER BY e.id")
+                LEFT JOIN recovery_credits r ON r.event_id=e.id
+                WHERE s.local_day IS NULL OR s.local_day NOT IN (SELECT day FROM day_summaries) ORDER BY e.id")
             .map_err(|e| e.to_string())?
             .query_map([], |r| {
                 let sample = r.get::<_, bool>(18)?;

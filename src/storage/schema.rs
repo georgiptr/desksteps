@@ -1,8 +1,9 @@
 //! Schema initialization. Original recorder tables stay compatible; projections are additive.
 use super::*;
 pub(crate) fn initialize_statistics(conn: &Connection) -> rusqlite::Result<()> {
-    // Keep recorder schema version 1: these independent additive tables are
-    // ignored by older recorders. Missing derived rows remain explicit legacy.
+    // Additive tables keep recorder schema version 1 and are ignored by older
+    // recorders. Only the first history compaction raises the version, because
+    // older versions cannot read compacted days. Missing derived rows remain legacy.
     conn.execute_batch("CREATE TABLE IF NOT EXISTS ui_preferences(day TEXT PRIMARY KEY, weight REAL, steps INTEGER, minutes REAL, calories REAL);
         CREATE TABLE IF NOT EXISTS ui_sessions(id INTEGER PRIMARY KEY, device TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, state TEXT NOT NULL, gap INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS ui_anchors(device TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -13,7 +14,8 @@ pub(crate) fn initialize_statistics(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS recovery_baselines(device TEXT PRIMARY KEY, sample TEXT NOT NULL, utc TEXT NOT NULL, connection TEXT NOT NULL, mono INTEGER, excluded INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS recovery_credits(event_id INTEGER PRIMARY KEY REFERENCES events(id), steps INTEGER NOT NULL, active_ms INTEGER NOT NULL, factor REAL);
         CREATE INDEX IF NOT EXISTS events_device_id ON events(device,id);
-        CREATE TABLE IF NOT EXISTS pad_calories(event_id INTEGER PRIMARY KEY REFERENCES samples(event_id) ON DELETE CASCADE, kcal INTEGER, recovered INTEGER NOT NULL, incomplete INTEGER NOT NULL, baseline INTEGER NOT NULL);")
+        CREATE TABLE IF NOT EXISTS pad_calories(event_id INTEGER PRIMARY KEY REFERENCES samples(event_id) ON DELETE CASCADE, kcal INTEGER, recovered INTEGER NOT NULL, incomplete INTEGER NOT NULL, baseline INTEGER NOT NULL);")?;
+    conn.execute_batch(super::compaction::SCHEMA)
 }
 impl Store {
     pub(crate) fn initialize(conn: Connection, timezone: Tz) -> Result<Self, String> {
@@ -22,7 +24,7 @@ impl Store {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 1 {
+        if version > super::compaction::COMPACTED_VERSION {
             return Err("This database requires a newer DeskSteps version".into());
         }
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
@@ -38,8 +40,11 @@ impl Store {
             CREATE INDEX IF NOT EXISTS samples_day ON samples(local_day, quality);
             CREATE TABLE IF NOT EXISTS anchors(
                 device TEXT PRIMARY KEY, connection_id TEXT NOT NULL, utc TEXT NOT NULL,
-                monotonic_ns INTEGER, steps INTEGER NOT NULL, elapsed_s INTEGER, local_day TEXT NOT NULL);
-            PRAGMA user_version=1;").map_err(|e| e.to_string())?;
+                monotonic_ns INTEGER, steps INTEGER NOT NULL, elapsed_s INTEGER, local_day TEXT NOT NULL);").map_err(|e| e.to_string())?;
+        if version == 0 {
+            conn.pragma_update(None, "user_version", 1)
+                .map_err(|e| e.to_string())?;
+        }
         let timezone_name = timezone.name();
         let previous: Option<String> = conn
             .query_row("SELECT value FROM settings WHERE key='timezone'", [], |r| {
@@ -63,6 +68,7 @@ impl Store {
             conn,
             timezone,
             ownership: None,
+            compacted_for: None,
         };
         store.rebuild_sessions()?;
         store.backfill_pad_calories()?;

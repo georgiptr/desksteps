@@ -47,10 +47,39 @@ fn steps(value: &str) -> Result<Option<i64>, String> {
         .map(Some)
         .map_err(|_| "Step target must be a whole number.".to_string())
 }
+pub const KG_PER_LB: f64 = 0.453_592_37;
+const POUNDS_RANGE: &str = "Weight must be between 44.1 and 330.7 lb, or blank.";
+fn tenths(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+fn short(value: f64) -> String {
+    format!("{}", tenths(value))
+}
+/// Field text for a stored weight in kilograms, shown in the chosen unit.
+pub fn weight_text(kg: Option<f64>, pounds: bool) -> String {
+    match kg {
+        None => String::new(),
+        Some(kg) if pounds => short(kg / KG_PER_LB),
+        Some(kg) => format!("{kg}"),
+    }
+}
+/// Converts the field text when the unit changes; text that is not a number stays.
+pub fn convert_text(text: &str, to_pounds: bool) -> String {
+    match number(text) {
+        Ok(Some(v)) if v.is_finite() => short(if to_pounds {
+            v / KG_PER_LB
+        } else {
+            v * KG_PER_LB
+        }),
+        _ => text.into(),
+    }
+}
 /// Checks every field and reports each failing one next to its field.
+/// A weight in pounds is converted to kilograms, to 0.1 kg.
 pub fn check(
     effective: &str,
     weight: &str,
+    pounds: bool,
     steps_text: &str,
     minutes: &str,
     calories: &str,
@@ -61,10 +90,21 @@ pub fn check(
     if let Err(e) = statistics::date(&effective) {
         fail(Field::Date, e);
     }
-    let weight = number(weight).unwrap_or_else(|e| {
-        fail(Field::Weight, e);
-        None
-    });
+    let weight = number(weight)
+        .unwrap_or_else(|e| {
+            fail(Field::Weight, e);
+            None
+        })
+        .and_then(|w| {
+            if !pounds {
+                Some(w)
+            } else if (44.1..=330.7).contains(&w) {
+                Some(tenths(w * KG_PER_LB))
+            } else {
+                fail(Field::Weight, POUNDS_RANGE.into());
+                None
+            }
+        });
     let steps = steps(steps_text).unwrap_or_else(|e| {
         fail(Field::Steps, e);
         None
@@ -154,10 +194,10 @@ pub fn confirmation(effective: &str) -> String {
 mod tests {
     use super::*;
     fn ok(effective: &str, w: &str, s: &str, m: &str, c: &str) -> Preferences {
-        check(effective, w, s, m, c).unwrap()
+        check(effective, w, false, s, m, c).unwrap()
     }
     fn err(effective: &str, w: &str, s: &str, m: &str, c: &str) -> Vec<FieldError> {
-        check(effective, w, s, m, c).unwrap_err()
+        check(effective, w, false, s, m, c).unwrap_err()
     }
     #[test]
     fn blank_fields_disable_optional_preferences() {
@@ -214,7 +254,9 @@ mod tests {
     fn weight_endpoints_are_inclusive_and_blank_stays_optional() {
         for (input, expected) in [("20", Some(20.0)), ("150", Some(150.0)), ("", None)] {
             assert_eq!(
-                check("2026-10-25", input, "", "", "").unwrap().weight,
+                check("2026-10-25", input, false, "", "", "")
+                    .unwrap()
+                    .weight,
                 expected
             );
         }
@@ -239,6 +281,25 @@ mod tests {
         let e = err("bad", "x", "1.5", "0", "-2");
         let fields: Vec<_> = e.iter().map(|e| e.field).collect();
         assert_eq!(fields, Field::ALL.to_vec());
+    }
+    #[test]
+    fn pounds_are_converted_to_tenths_of_a_kilogram_and_back() {
+        let lb = |w: &str| check("2026-10-25", w, true, "", "", "");
+        assert_eq!(lb("176.4").unwrap().weight, Some(80.0));
+        assert_eq!(lb("44.1").unwrap().weight, Some(20.0));
+        assert_eq!(lb("330.7").unwrap().weight, Some(150.0));
+        assert_eq!(lb("").unwrap().weight, None);
+        for bad in ["44", "330.8", "-1", "NaN"] {
+            assert_eq!(lb(bad).unwrap_err()[0].message, POUNDS_RANGE, "{bad}");
+        }
+        assert!(lb("x").unwrap_err()[0].message.contains("number"));
+        assert_eq!(weight_text(Some(80.0), true), "176.4");
+        assert_eq!(weight_text(Some(80.5), false), "80.5");
+        assert_eq!(weight_text(None, true), "");
+        assert_eq!(convert_text("80", true), "176.4");
+        assert_eq!(convert_text("176.4", false), "80");
+        assert_eq!(convert_text(" ", true), " ");
+        assert_eq!(convert_text("abc", false), "abc");
     }
     #[test]
     fn confirmation_names_the_effective_date() {

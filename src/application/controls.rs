@@ -3,6 +3,32 @@ use super::{exchange::Exchange, ports::PendingWrite};
 use crate::control::{self, Command, Transaction};
 use std::collections::VecDeque;
 
+/// Measured motion must persist this long before the start speed is sent; an
+/// upstream report links speed changes during spin-up to BLE disruption.
+pub const START_SETTLE_NS: i64 = 2_000_000_000;
+/// A pending start speed that cannot be sent within this window is dropped.
+pub const START_WINDOW_NS: i64 = 10_000_000_000;
+/// A remote start needs fresh evidence at most this old before the first
+/// moving sample: a stopped sample, or a countdown followed by Machine Status
+/// started. Older or missing evidence never triggers the override.
+pub const REMOTE_STOPPED_NS: i64 = 10_000_000_000;
+
+/// Owner preferences for the speed a newly started belt is brought to.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StartSpeed {
+    /// Target in 0.1 km/h units; `None` leaves the pad's own start speed.
+    pub target: Option<u8>,
+    /// Also apply after a start this app did not send (remote, pad, other app).
+    pub remote: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PendingStart {
+    pub generation: u64,
+    pub target: u8,
+    pub due: i64,
+}
+
 pub(super) struct Controls<W: PendingWrite> {
     pub exchange: Option<Exchange<W>>,
     pub pause_requested: bool,
@@ -11,6 +37,12 @@ pub(super) struct Controls<W: PendingWrite> {
     pub access_granted: bool,
     pub selected_speed: Option<(u64, f64, i64)>,
     pub speed_confirmation: Option<Transaction>,
+    pub start_speed: StartSpeed,
+    pub pending_start: Option<PendingStart>,
+    /// Latest Training Status countdown frame on a connection.
+    countdown: Option<(u64, i64)>,
+    /// Machine Status started after a countdown with no app Start in flight.
+    status_start: Option<(u64, i64)>,
     speed_queue: VecDeque<(Transaction, i64)>,
 }
 
@@ -24,6 +56,10 @@ impl<W: PendingWrite> Controls<W> {
             access_granted: false,
             selected_speed: None,
             speed_confirmation: None,
+            start_speed: StartSpeed::default(),
+            pending_start: None,
+            countdown: None,
+            status_start: None,
             speed_queue: VecDeque::new(),
         }
     }
@@ -32,12 +68,31 @@ impl<W: PendingWrite> Controls<W> {
         self.pause_requested = false;
         self.fresh_speed = None;
         self.access_granted = false;
+        self.countdown = None;
+        self.status_start = None;
         self.discard_speeds();
+    }
+    /// Training Status countdown (`03 ...`) seen on the current connection.
+    pub fn countdown(&mut self, generation: u64, mono: i64) {
+        self.countdown = Some((generation, mono));
+    }
+    /// Machine Status started (`04`). The tested pad sends no treadmill data
+    /// while idle after connecting, so a fresh countdown followed by this
+    /// status is the evidence of a start this app did not command.
+    pub fn machine_started(&mut self, generation: u64, mono: i64) {
+        let counted = self.countdown.take().is_some_and(|(g, t)| {
+            g == generation
+                && mono
+                    .checked_sub(t)
+                    .is_some_and(|age| (0..=REMOTE_STOPPED_NS).contains(&age))
+        });
+        self.status_start = (counted && self.exchange.is_none()).then_some((generation, mono));
     }
     pub fn discard_speeds(&mut self) {
         self.speed_queue.clear();
         self.selected_speed = None;
         self.speed_confirmation = None;
+        self.pending_start = None;
     }
     pub fn speed_available(&self) -> bool {
         !self.pause_requested
@@ -122,6 +177,9 @@ impl<W: PendingWrite> Controls<W> {
         if !enabled {
             return Err("Controls are unavailable".into());
         }
+        if matches!(command, Command::SetSpeed(_)) {
+            return Err("Start speed is sent only by its setting".into());
+        }
         if command == Command::StartResume && self.speed_confirmation.is_some() {
             return Err("A selected speed is still awaiting measured telemetry".into());
         }
@@ -150,10 +208,88 @@ impl<W: PendingWrite> Controls<W> {
         }
         Transaction::new(command, speed, self.increment, generation, now)
     }
+    /// Build the one automatic start-speed write once motion has settled.
+    /// Anything stale, busy, or already at target drops it without a write.
+    pub fn take_start(
+        &mut self,
+        current: Option<u64>,
+        now: i64,
+    ) -> Result<Option<Transaction>, String> {
+        let Some(pending) = self.pending_start else {
+            return Ok(None);
+        };
+        if current != Some(pending.generation) || now >= pending.due + START_WINDOW_NS {
+            self.pending_start = None;
+            return Err("Start speed not sent: connection changed or motion did not settle".into());
+        }
+        if now < pending.due
+            || self.exchange.is_some()
+            || self.pause_requested
+            || !self.speed_queue.is_empty()
+        {
+            return Ok(None);
+        }
+        self.pending_start = None;
+        if self.selected_speed.is_some() || self.speed_confirmation.is_some() {
+            return Ok(None); // an explicit speed click wins
+        }
+        let Some(measured) = control::current_speed(self.fresh_speed, pending.generation, now)
+            .filter(|s| (1.0..=6.0).contains(s))
+        else {
+            return Err("Start speed not sent: no fresh moving telemetry".into());
+        };
+        if (measured * 10.0).round() as i32 == i32::from(pending.target) {
+            return Ok(None);
+        }
+        Transaction::new(
+            Command::SetSpeed(pending.target),
+            Some(measured),
+            self.increment,
+            pending.generation,
+            now,
+        )
+        .map(Some)
+    }
     pub fn observe(&mut self, generation: u64, speed: f64, mono: i64) -> Option<Command> {
-        self.fresh_speed = Some((generation, speed, mono));
+        let previous = self.fresh_speed.replace((generation, speed, mono));
         if speed < 1.0 && self.selected_speed.is_some_and(|(g, _, _)| g == generation) {
             self.discard_speeds();
+        }
+        if speed.is_nan() || speed < 1.0 {
+            self.pending_start = None;
+        }
+        let started = self.exchange.as_ref().is_some_and(|p| {
+            p.transaction.command() == Command::StartResume
+                && p.transaction.confirmed(generation, mono, speed)
+        });
+        // A stop-to-moving change with no app Start in flight was started
+        // elsewhere. Reconnecting to a moving belt has no stopped sample.
+        let recent = |evidence: Option<(u64, i64)>, at_least: i64| {
+            evidence.is_some_and(|(g, t)| {
+                g == generation
+                    && mono
+                        .checked_sub(t)
+                        .is_some_and(|age| (at_least..=REMOTE_STOPPED_NS).contains(&age))
+            })
+        };
+        let stopped = previous
+            .filter(|(_, s, _)| *s <= 0.0)
+            .map(|(g, _, t)| (g, t));
+        let status = if speed >= 1.0 {
+            self.status_start.take()
+        } else {
+            None
+        };
+        let external =
+            self.exchange.is_none() && speed >= 1.0 && (recent(stopped, 1) || recent(status, 0));
+        if let Some(target) = self.start_speed.target
+            && (started || (external && self.start_speed.remote))
+        {
+            self.pending_start = Some(PendingStart {
+                generation,
+                target,
+                due: mono.saturating_add(START_SETTLE_NS),
+            });
         }
         if let Some(sent) = &self.speed_confirmation
             && sent.confirmed(generation, mono, speed)
@@ -420,5 +556,221 @@ mod tests {
         c.exchange = None;
         assert_eq!(c.take_pause(Some(7)), Some((Command::Pause, 7)));
         assert!(c.next_speed(Some(7), 3).unwrap().is_none());
+    }
+
+    fn started(c: &mut Controls<Write>, generation: u64, at: i64) {
+        let mut t = Transaction::new(Command::StartResume, None, 1, generation, at).unwrap();
+        t.reply(&[0x80, 0, 1], at + 1).unwrap();
+        t.reply(&[0x80, 7, 1], at + 2).unwrap();
+        c.exchange = Some(Exchange {
+            transaction: t,
+            write: None,
+            written: true,
+        });
+    }
+    fn with_start(target: Option<u8>, remote: bool) -> Controls<Write> {
+        let mut c = controls();
+        c.start_speed = StartSpeed { target, remote };
+        c
+    }
+    const S: i64 = 1_000_000_000;
+    #[test]
+    fn app_start_sends_one_absolute_start_speed_after_settled_motion() {
+        let mut c = with_start(Some(30), false);
+        c.observe(7, 0.0, 0);
+        started(&mut c, 7, 0);
+        assert_eq!(c.observe(7, 1.0, 3), Some(Command::StartResume));
+        assert_eq!(
+            c.pending_start,
+            Some(PendingStart {
+                generation: 7,
+                target: 30,
+                due: 3 + START_SETTLE_NS
+            })
+        );
+        c.observe(7, 1.0, S);
+        assert!(c.take_start(Some(7), S).unwrap().is_none()); // still settling
+        assert!(c.pending_start.is_some());
+        c.observe(7, 1.0, 2 * S + 3);
+        let t = c.take_start(Some(7), 2 * S + 3).unwrap().unwrap();
+        assert_eq!(t.command(), Command::SetSpeed(30));
+        assert_eq!(t.target(), Some(3.0));
+        assert!(c.pending_start.is_none());
+        assert!(c.take_start(Some(7), 2 * S + 4).unwrap().is_none()); // once only
+        // Without a configured target the pad's own start speed is left alone.
+        let mut c = with_start(None, true);
+        c.observe(7, 0.0, 0);
+        started(&mut c, 7, 0);
+        c.observe(7, 1.0, 3);
+        assert!(c.pending_start.is_none());
+        c.exchange = None;
+        c.observe(7, 0.0, 4);
+        c.observe(7, 1.0, 5);
+        assert!(c.pending_start.is_none());
+    }
+    #[test]
+    fn remote_start_needs_the_setting_and_a_recent_stopped_sample_in_this_connection() {
+        let mut c = with_start(Some(25), false);
+        c.observe(7, 0.0, 0);
+        c.observe(7, 1.0, S);
+        assert!(c.pending_start.is_none()); // remote override off
+        let mut c = with_start(Some(25), true);
+        c.observe(7, 0.0, 0);
+        c.observe(7, 1.0, S);
+        assert_eq!(c.pending_start.map(|p| p.target), Some(25));
+        // Reconnect while walking: no stopped sample, never a speed command.
+        let mut c = with_start(Some(25), true);
+        c.observe(8, 2.0, 0);
+        c.observe(8, 2.0, S);
+        assert!(c.pending_start.is_none());
+        for (previous, at) in [
+            ((7, 0.0, 0), REMOTE_STOPPED_NS + 1), // stopped evidence too old
+            ((6, 0.0, 0), S),                     // other connection
+            ((7, 0.5, 0), S),                     // not a stopped sample
+            ((7, 0.0, S), S),                     // same instant, no interval
+        ] {
+            let mut c = with_start(Some(25), true);
+            c.fresh_speed = Some(previous);
+            c.observe(7, 1.0, at);
+            assert!(c.pending_start.is_none(), "{previous:?} {at}");
+        }
+        // Moving with an unrelated exchange in flight is not a remote start.
+        let mut c = with_start(Some(25), true);
+        c.observe(7, 0.0, 0);
+        c.exchange = Some(Exchange {
+            transaction: Transaction::new(Command::Pause, None, 1, 7, 0).unwrap(),
+            write: None,
+            written: false,
+        });
+        c.observe(7, 1.0, S);
+        assert!(c.pending_start.is_none());
+    }
+    fn pending(c: &mut Controls<Write>) {
+        c.observe(7, 0.0, 0);
+        c.observe(7, 1.0, S);
+        c.observe(7, 1.0, 3 * S);
+        assert!(c.pending_start.is_some());
+    }
+    #[test]
+    fn stop_pause_clicks_and_reconnect_cancel_the_start_speed_without_a_write() {
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        c.observe(7, 0.0, 3 * S + 1);
+        assert!(c.pending_start.is_none());
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        c.discard_speeds(); // Pause, errors and Start all discard it
+        assert!(c.pending_start.is_none());
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        c.reset();
+        assert!(c.pending_start.is_none());
+        // An explicit speed selection wins over the setting.
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        let click = c
+            .prepare(Command::Increase, 7, Some(7), true, false, 3 * S)
+            .unwrap();
+        c.queue_speed(click, 3 * S).unwrap();
+        assert!(c.take_start(Some(7), 3 * S + 1).unwrap().is_none());
+        assert!(c.pending_start.is_some()); // waits behind the queued click
+        c.next_speed(Some(7), 3 * S + 2).unwrap().unwrap();
+        assert!(c.take_start(Some(7), 3 * S + 3).unwrap().is_none());
+        assert!(c.pending_start.is_none());
+        // Pause or another exchange holds it back without consuming it.
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        c.pause_requested = true;
+        assert!(c.take_start(Some(7), 3 * S + 1).unwrap().is_none());
+        assert!(c.pending_start.is_some());
+    }
+    #[test]
+    fn stale_connection_telemetry_or_matching_speed_never_writes() {
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        assert!(c.take_start(Some(8), 3 * S + 1).is_err());
+        assert!(c.pending_start.is_none());
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        assert!(c.take_start(None, 3 * S + 1).is_err());
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        assert!(
+            c.take_start(Some(7), S + START_SETTLE_NS + START_WINDOW_NS)
+                .is_err()
+        );
+        let mut c = with_start(Some(30), true);
+        pending(&mut c);
+        assert!(c.take_start(Some(7), 6 * S + 1).is_err()); // telemetry older than 3 s
+        assert!(c.pending_start.is_none());
+        let mut c = with_start(Some(10), true);
+        pending(&mut c);
+        assert!(c.take_start(Some(7), 3 * S + 1).unwrap().is_none()); // already at 1.0
+        assert!(c.pending_start.is_none());
+        assert!(
+            c.prepare(Command::SetSpeed(30), 7, Some(7), true, false, 3 * S)
+                .unwrap_err()
+                .contains("only by its setting")
+        );
+    }
+
+    #[test]
+    fn countdown_then_started_status_is_a_remote_start_when_the_pad_is_silent_while_idle() {
+        // Device-recorded order: no treadmill data while idle, countdown,
+        // Machine Status started, then the first reading already at 1.0.
+        let mut c = with_start(Some(25), true);
+        c.countdown(7, 0);
+        c.countdown(7, 3 * S);
+        c.machine_started(7, 3 * S + 50);
+        c.observe(7, 1.0, 3 * S + 200);
+        assert_eq!(c.pending_start.map(|p| p.target), Some(25));
+        // Used once: later readings do not re-arm it.
+        c.pending_start = None;
+        c.observe(7, 1.0, 4 * S);
+        assert!(c.pending_start.is_none());
+        // The remote option is required.
+        let mut c = with_start(Some(25), false);
+        c.countdown(7, 0);
+        c.machine_started(7, 1);
+        c.observe(7, 1.0, 2);
+        assert!(c.pending_start.is_none());
+        for (countdown, started, moving) in [
+            (None, 0, S),         // started status without a countdown
+            (Some((6, 0)), 1, S), // countdown from another connection
+            (Some((7, 0)), REMOTE_STOPPED_NS + 1, REMOTE_STOPPED_NS + 2), // countdown too old
+            (Some((7, 0)), 1, REMOTE_STOPPED_NS + 2), // moving reading too late
+        ] {
+            let mut c = with_start(Some(25), true);
+            if let Some((g, t)) = countdown {
+                c.countdown(g, t);
+            }
+            c.machine_started(7, started);
+            c.observe(7, 1.0, moving);
+            assert!(
+                c.pending_start.is_none(),
+                "{countdown:?} {started} {moving}"
+            );
+        }
+        // A stopped reading in between keeps the evidence for the next moving one.
+        let mut c = with_start(Some(25), true);
+        c.countdown(7, 0);
+        c.machine_started(7, 1);
+        c.observe(7, 0.0, 2);
+        c.observe(7, 1.0, S);
+        assert!(c.pending_start.is_some());
+        // An app Start in flight owns its own start; reconnect clears evidence.
+        let mut c = with_start(Some(25), true);
+        started(&mut c, 7, 0);
+        c.countdown(7, 1);
+        c.machine_started(7, 2);
+        c.exchange = None;
+        c.observe(7, 1.0, 3);
+        assert!(c.pending_start.is_none());
+        let mut c = with_start(Some(25), true);
+        c.countdown(7, 0);
+        c.machine_started(7, 1);
+        c.reset();
+        c.observe(7, 1.0, 2);
+        assert!(c.pending_start.is_none());
     }
 }

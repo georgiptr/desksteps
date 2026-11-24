@@ -15,6 +15,7 @@ mod api;
 mod bluetooth;
 mod connection;
 mod controls;
+pub use controls::StartSpeed;
 mod engine;
 mod exchange;
 mod messages;
@@ -35,6 +36,7 @@ use messages::{DeviceEvent, Input};
 use telemetry::*;
 pub const UPDATE_MESSAGE: u32 = 0x8001;
 const MACHINE_STATUS: &str = "00002ada-0000-1000-8000-00805f9b34fb";
+const TRAINING_STATUS: &str = "00002ad3-0000-1000-8000-00805f9b34fb";
 
 pub struct Worker {
     pub sender: CommandSender,
@@ -262,6 +264,38 @@ mod tests {
             assert_eq!(worker.view.snapshot().theme_preference, preference);
             assert!(!worker.view.snapshot().connected);
         }
+    }
+    #[test]
+    fn weight_unit_and_hidden_empty_days_survive_restart() {
+        let folder = std::env::temp_dir().join(format!(
+            "desksteps-ui-prefs-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let database = folder.join("test.sqlite");
+        let options = || Options {
+            database_ownership: None,
+            database: database.clone(),
+            timezone: chrono_tz::UTC,
+            device: None,
+            no_bluetooth: true,
+            development: false,
+            smoke_seconds: None,
+            controls_enabled: false,
+        };
+        for on in [true, false] {
+            let worker = start(options(), || {});
+            worker.sender.send(UserCommand::WeightInPounds(on)).unwrap();
+            worker.sender.send(UserCommand::HideEmptyDays(on)).unwrap();
+            worker.sender.send(UserCommand::Exit).unwrap();
+            worker.join.join().unwrap();
+            let worker = start(options(), || {});
+            worker.sender.send(UserCommand::Exit).unwrap();
+            worker.join.join().unwrap();
+            let v = worker.view.snapshot();
+            assert!(v.error.is_none());
+            assert_eq!((v.weight_in_pounds, v.hide_empty_days), (on, on));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn window_preferences_survive_restart_and_offline_modes_ignore_windows_startup() {

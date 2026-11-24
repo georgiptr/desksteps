@@ -104,6 +104,9 @@ impl Scene {
         data.range = ctx.range;
         data.form = ctx.form.clone();
         data.form.message = view.ui_message.clone();
+        if let Some(pounds) = ctx.form.pounds {
+            data.weight_in_pounds = pounds;
+        }
         if data.form.effective.is_empty() {
             data.form.effective = view.totals.day.clone();
         }
@@ -112,7 +115,13 @@ impl Scene {
         {
             match screen {
                 Screen::Today | Screen::HistoryDay => data.day = Some(DayView::new(dash)),
-                Screen::History => data.history = Some(HistoryView::new(dash)),
+                Screen::History => {
+                    let mut history = HistoryView::new(dash);
+                    if view.hide_empty_days {
+                        history.hide_empty_days();
+                    }
+                    data.history = Some(history);
+                }
                 _ => {}
             }
         }
@@ -156,9 +165,9 @@ impl Scene {
                     page_targets.push((*down, a, !data.disabled.contains(down), true));
                     page_targets.push((*up, c, !data.disabled.contains(up), true));
                 }
-                Block::Field { id, .. } => {
-                    page_targets.push((*id, pages::field_frame(at), true, true));
-                    fields.push((*id, pages::field_edit(at)));
+                Block::Field { id, trailing, .. } => {
+                    page_targets.push((*id, pages::field_frame(at, *trailing), true, true));
+                    fields.push((*id, pages::field_edit(at, *trailing)));
                 }
                 Block::IconButton { id, .. } => {
                     page_targets.push((*id, at, *id != pages::NEXT || can_next, true))

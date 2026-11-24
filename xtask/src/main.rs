@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
+mod screenshots;
 fn run(command: &mut Command) -> Result<Output, String> {
     let output = command.output().map_err(|e| e.to_string())?;
     for line in String::from_utf8_lossy(&output.stdout)
@@ -54,8 +55,9 @@ fn work() -> Result<(), String> {
             cmd.args(&args[1..]);
             run(&mut cmd).map(|_| ())
         }
+        Some("screenshots") => screenshots::export(root, args.iter().any(|s| s == "--offline")),
         _ => Err(
-            "Use cargo xtask quality [--offline], coverage-gate REPORT, or package [-Iscc PATH]"
+            "Use cargo xtask quality [--offline], coverage-gate REPORT, package [-Iscc PATH],              or screenshots [--offline]"
                 .into(),
         ),
     }
@@ -195,16 +197,14 @@ fn replay(exe: &Path, report: &Path, pattern: &Path) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     for expected in [3, 0] {
-        run(Command::new(exe)
+        let output = run(Command::new(exe)
             .arg("--replay")
             .arg(&source)
             .arg("--database")
             .arg(&db)
             .env("LLVM_PROFILE_FILE", pattern))?;
-        let value: serde_json::Value = serde_json::from_slice(
-            &fs::read(db.with_extension("replay-report.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
         if value["inserted_events"] != expected || value["decode_errors"] != 1 {
             return Err("Synthetic replay rejection/idempotence failed".into());
         }

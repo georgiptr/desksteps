@@ -329,7 +329,9 @@ fn draw_block(
                 widgets::choice_row(p, th, r, label, *chosen, *divider, state(*id));
             }
         }
-        Block::Stepper { down, up, value } => {
+        Block::Stepper {
+            down, up, value, ..
+        } => {
             let (a, c) = pages::stepper_buttons(r);
             widgets::icon_button(p, th, a, '\u{E738}', ButtonKind::Standard, state(*down));
             widgets::icon_button(p, th, c, '\u{E710}', ButtonKind::Standard, state(*up));
@@ -348,6 +350,7 @@ fn draw_block(
             label,
             caption,
             error,
+            trailing,
         } => {
             p.text(
                 Rect::new(r.x, r.y, r.w, 18.0),
@@ -356,7 +359,7 @@ fn draw_block(
                 th.text,
                 Align::Start,
             );
-            let frame = pages::field_frame(r);
+            let frame = pages::field_frame(r, *trailing);
             p.fill_round(frame, 4.0, th.control);
             if error.is_some() {
                 p.stroke_round(frame, 4.0, th.bad, 1.5);

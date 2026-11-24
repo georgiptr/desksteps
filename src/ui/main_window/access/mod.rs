@@ -252,6 +252,19 @@ pub fn build(scene: &Scene, page: Page, screen: Screen, focus: Option<Id>) -> Ve
                 let name = match *id {
                     pages::DATE => format!("Choose date, {label}"),
                     pages::EFFECTIVE => format!("Choose the effective date, {label}"),
+                    pages::WEIGHT_KG | pages::WEIGHT_LB => format!(
+                        "Weight in {}{}",
+                        if *id == pages::WEIGHT_KG {
+                            "kilograms"
+                        } else {
+                            "pounds"
+                        },
+                        if (*id == pages::WEIGHT_LB) == data.weight_in_pounds {
+                            ", selected"
+                        } else {
+                            ""
+                        }
+                    ),
                     x if (pages::THEME_BASE..pages::THEME_BASE + 3).contains(&x) => {
                         let preference = crate::appearance::ThemePreference::ALL
                             [(x - pages::THEME_BASE) as usize];
@@ -305,13 +318,18 @@ pub fn build(scene: &Scene, page: Page, screen: Screen, focus: Option<Id>) -> Ve
                     button(&mut items, *id, name, None, rr, Kind::ListItem, None, off);
                 }
             }
-            Block::Stepper { down, up, value } => {
+            Block::Stepper {
+                down,
+                up,
+                name,
+                value,
+            } => {
                 let (a, c) = pages::stepper_buttons(at);
-                text(&mut items, format!("Speed step {value}"), rr, off);
+                text(&mut items, format!("{name} {value}"), rr, off);
                 button(
                     &mut items,
                     *down,
-                    "Decrease speed step".into(),
+                    format!("Decrease {}", name.to_lowercase()),
                     None,
                     rect(a),
                     Kind::Button,
@@ -321,7 +339,7 @@ pub fn build(scene: &Scene, page: Page, screen: Screen, focus: Option<Id>) -> Ve
                 button(
                     &mut items,
                     *up,
-                    "Increase speed step".into(),
+                    format!("Increase {}", name.to_lowercase()),
                     None,
                     rect(c),
                     Kind::Button,

@@ -12,7 +12,7 @@ use crate::{
         model::{
             day::{DayView, HistoryView},
             device,
-            live::START_HINT,
+            live::start_hint,
             page::Page,
             shortcuts_form,
         },
@@ -49,9 +49,30 @@ pub const WINDOWS_STARTUP: Id = 82;
 pub const MINIMIZE_TO_TRAY: Id = 83;
 pub const KEEP_RUNNING_ON_CLOSE: Id = 84;
 pub const START_MINIMIZED: Id = 85;
+pub const START_SPEED_DOWN: Id = 86;
+pub const START_SPEED_UP: Id = 87;
+pub const REMOTE_START: Id = 88;
+pub const WEIGHT_KG: Id = 89;
+pub const WEIGHT_LB: Id = 90;
+pub const HIDE_EMPTY_DAYS: Id = 91;
 pub const STEP_DOWN: Id = 80;
 pub const STEP_UP: Id = 81;
 pub const ROW_BASE: Id = 1000;
+/// Stepper value for a start speed in 0.1 km/h units.
+pub fn start_speed_label(target: Option<u8>) -> String {
+    target.map_or("Pad default".into(), |t| {
+        format!("{:.1} km/h", f64::from(t) / 10.0)
+    })
+}
+/// The next start speed one stepper click selects: below 1.0 is the pad default.
+pub fn next_start_speed(target: Option<u8>, up: bool) -> Option<u8> {
+    match (target, up) {
+        (None, true) => Some(10),
+        (None, false) | (Some(..=10), false) => None,
+        (Some(t), true) => Some((t + 1).min(60)),
+        (Some(t), false) => Some(t - 1),
+    }
+}
 pub const BAR_BASE: Id = 2000;
 /// Native EDIT fields: 3000-3003 on Targets, 3010-3013 shortcuts on Settings.
 pub const FIELD_BASE: Id = 3000;
@@ -238,6 +259,8 @@ pub enum Block {
     Stepper {
         down: Id,
         up: Id,
+        /// Accessible name of the value, such as "Speed step".
+        name: &'static str,
         value: String,
     },
     /// Plain body-size label.
@@ -250,6 +273,8 @@ pub enum Block {
         label: String,
         caption: Option<String>,
         error: Option<String>,
+        /// Width kept free right of the input for controls beside it.
+        trailing: f32,
     },
     DayHead,
     DayRow {
@@ -274,7 +299,11 @@ pub struct PageData {
     pub history: Option<HistoryView>,
     pub range: u32,
     pub increment: u8,
+    pub start_speed: crate::application::StartSpeed,
     pub recover_gaps: bool,
+    /// Unit of the Targets weight field.
+    pub weight_in_pounds: bool,
+    pub hide_empty_days: bool,
     pub devices: Devices,
     pub form: Form,
     /// Targets that are shown but cannot be used right now.
@@ -298,6 +327,8 @@ pub struct Form {
     pub shortcut_errors: [Option<String>; 4],
     pub shortcut_general: Option<String>,
     pub shortcuts_saved: bool,
+    /// Weight unit chosen in this window, ahead of the saved preference.
+    pub pounds: Option<bool>,
 }
 impl PageData {
     pub fn from_view(v: &View) -> Self {
@@ -308,15 +339,15 @@ impl PageData {
             startup_error: v.startup_error.clone(),
             theme_preference: v.theme_preference,
             connection: v.status.clone(),
-            device: v
-                .selected
-                .map(crate::address)
-                .unwrap_or_else(|| "none selected".into()),
+            device: device::selected_label(v).unwrap_or_else(|| "None".into()),
             step: format!("{:.1} km/h", v.increment.max(1) as f64 / 10.0),
             version: env!("CARGO_PKG_VERSION").into(),
             range: 30,
             increment: v.increment.max(1),
+            start_speed: v.start_speed,
             recover_gaps: v.recover_gaps,
+            weight_in_pounds: v.weight_in_pounds,
+            hide_empty_days: v.hide_empty_days,
             devices: Devices {
                 available: device::available(v),
                 automatic: v.automatic_connection,
@@ -337,6 +368,11 @@ impl PageData {
                 }
                 if v.increment >= 10 {
                     off.push(STEP_UP);
+                }
+                match v.start_speed.target {
+                    None => off.extend([START_SPEED_DOWN, REMOTE_START]),
+                    Some(t) if t >= 60 => off.push(START_SPEED_UP),
+                    Some(_) => {}
                 }
                 if !device::available(v) {
                     off.extend([AUTO, SCAN, DISCONNECT]);
@@ -566,6 +602,28 @@ fn history_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
             },
         );
     }
+    let toggle_w = 170.0_f32.min(width);
+    let toggle_x = RANGES.len() as f32 * 96.0 + 8.0;
+    if toggle_x + toggle_w > width {
+        y += 32.0 + 8.0;
+    }
+    b.put(
+        Rect::new(
+            if toggle_x + toggle_w > width {
+                0.0
+            } else {
+                toggle_x
+            },
+            y,
+            toggle_w,
+            32.0,
+        ),
+        Block::Toggle {
+            id: HIDE_EMPTY_DAYS,
+            label: "Hide empty days".into(),
+            on: data.hide_empty_days,
+        },
+    );
     y += 32.0 + GAP;
     let Some(history) = &data.history else {
         return loading(b, y, width);
@@ -576,7 +634,7 @@ fn history_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
     let list = |b: &mut Builder, x: f32, y: f32, w: f32| -> f32 {
         let mut y = b.section(x, y, w, "Days");
         if n == 0 {
-            return b.note(x, y, w, "No days in this range.");
+            return b.note(x, y, w, "No days to show.");
         }
         b.put(Rect::new(x, y, w, list_h), Block::Panel);
         b.put(Rect::new(x, y, w, HEAD_HEIGHT), Block::DayHead);
@@ -619,12 +677,12 @@ pub fn field_height(caption: Option<&str>, error: Option<&str>, width: f32) -> f
         + 8.0
 }
 /// The framed input area inside a `Block::Field` rectangle.
-pub fn field_frame(block: Rect) -> Rect {
-    Rect::new(block.x, block.y + 20.0, block.w, 32.0)
+pub fn field_frame(block: Rect, trailing: f32) -> Rect {
+    Rect::new(block.x, block.y + 20.0, (block.w - trailing).max(0.0), 32.0)
 }
 /// Where the native EDIT control sits inside a field.
-pub fn field_edit(block: Rect) -> Rect {
-    field_frame(block).inset_xy(8.0, 6.0)
+pub fn field_edit(block: Rect, trailing: f32) -> Rect {
+    field_frame(block, trailing).inset_xy(8.0, 6.0)
 }
 fn field(
     b: &mut Builder,
@@ -644,6 +702,7 @@ fn field(
             label: label.into(),
             caption: caption.map(String::from),
             error: error.cloned(),
+            trailing: 0.0,
         },
     );
     y + h
@@ -661,6 +720,45 @@ fn flow(b: &mut Builder, mut y: f32, width: f32, items: Vec<(Id, String, ButtonK
         x += w + 8.0;
     }
     y + 32.0 + GAP
+}
+/// Weight field with its kg/lb switch beside the input.
+fn weight_field(b: &mut Builder, y: f32, width: f32, pounds: bool, error: Option<&String>) -> f32 {
+    let w = width.min(360.0);
+    let fw = w - 96.0;
+    let caption = if pounds {
+        "44.1–330.7 lb. Blank uses pad calories."
+    } else {
+        "20–150 kg. Blank uses pad calories."
+    };
+    let h = field_height(Some(caption), error.map(String::as_str), w);
+    b.put(
+        Rect::new(0.0, y, w, h),
+        Block::Field {
+            id: FIELD_BASE,
+            label: "Weight".into(),
+            caption: Some(caption.into()),
+            error: error.cloned(),
+            trailing: w - fw,
+        },
+    );
+    for (i, (id, label, on)) in [(WEIGHT_KG, "kg", !pounds), (WEIGHT_LB, "lb", pounds)]
+        .into_iter()
+        .enumerate()
+    {
+        b.put(
+            Rect::new(fw + 8.0 + i as f32 * 48.0, y + 20.0, 40.0, 32.0),
+            Block::Button {
+                id,
+                label: label.into(),
+                kind: if on {
+                    ButtonKind::Selected
+                } else {
+                    ButtonKind::Standard
+                },
+            },
+        );
+    }
+    y + h
 }
 fn targets_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
     let f = &data.form;
@@ -688,11 +786,8 @@ fn targets_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
         width,
         "Applies from this date until the next dated settings.",
     );
+    y = weight_field(b, y, width, data.weight_in_pounds, f.errors[1].as_ref());
     let captions = [
-        (
-            "Weight (kg)",
-            "Optional, 20 to 150. Blank uses pad calories.",
-        ),
         (
             "Step target",
             "Whole steps per day, or blank to turn the target off.",
@@ -711,10 +806,10 @@ fn targets_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
             b,
             y,
             width,
-            FIELD_BASE + i as Id,
+            FIELD_BASE + 1 + i as Id,
             label,
             Some(caption),
-            f.errors[i + 1].as_ref(),
+            f.errors[i + 2].as_ref(),
         );
     }
     y += 4.0;
@@ -766,8 +861,6 @@ fn settings_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
     if let Some(error) = &data.startup_error {
         y = b.error(0.0, y, width, error);
     }
-    y = b.section(0.0, y, width, "Calories");
-    y = b.note(0.0, y, width, "Without weight, calories come from your pad. With weight, DeskSteps estimates active calories; values may differ. Pad readings are always saved.");
     y = b.section(0.0, y, width, "Appearance");
     y = flow(
         b,
@@ -790,7 +883,6 @@ fn settings_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
             })
             .collect(),
     );
-    y = b.note(0.0, y, width, "Automatic follows the Windows app theme. Changes apply immediately. Windows high contrast takes priority.");
     // Device.
     y = b.section(0.0, y, width, "Device");
     let rows = [
@@ -828,7 +920,11 @@ fn settings_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
             "No devices found yet. Scan looks for a nearby WalkingPad for 10 seconds.",
         );
     } else {
-        y = b.note(0.0, y, width, "Choose a device to save as the default.");
+        b.put(
+            Rect::new(0.0, y, width, 18.0),
+            Block::Label("Default device".into()),
+        );
+        y += 22.0;
         let n = d.candidates.len();
         b.put(Rect::new(0.0, y, width, 36.0 * n as f32), Block::Panel);
         for i in 0..n {
@@ -866,11 +962,36 @@ fn settings_screen(b: &mut Builder, width: f32, data: &PageData) -> f32 {
         Block::Stepper {
             down: STEP_DOWN,
             up: STEP_UP,
+            name: "Speed step",
             value: format!("{:.1} km/h", data.increment as f32 / 10.0),
         },
     );
     y += 32.0 + GAP;
-    y = b.note(0.0, y, width, START_HINT);
+    b.put(
+        Rect::new(0.0, y, width, 18.0),
+        Block::Label("Start speed".into()),
+    );
+    y += 22.0;
+    b.put(
+        Rect::new(0.0, y, 220.0_f32.min(width), 32.0),
+        Block::Stepper {
+            down: START_SPEED_DOWN,
+            up: START_SPEED_UP,
+            name: "Start speed",
+            value: start_speed_label(data.start_speed.target),
+        },
+    );
+    y += 32.0 + 8.0;
+    b.put(
+        Rect::new(0.0, y, width, 32.0),
+        Block::Toggle {
+            id: REMOTE_START,
+            label: "Also apply when started from the remote".into(),
+            on: data.start_speed.remote,
+        },
+    );
+    y += 40.0;
+    y = b.note(0.0, y, width, &start_hint(data.start_speed));
     // Shortcuts.
     y = b.section(0.0, y, width, "Shortcuts");
     y = b.note(0.0, y, width, shortcuts_form::HELP);
@@ -1247,6 +1368,26 @@ mod tests {
         );
     }
     #[test]
+    fn hide_empty_days_switch_sits_beside_the_ranges_or_wraps_below() {
+        for (width, beside) in [(552.0, true), (400.0, false)] {
+            let mut d = data(0, 7);
+            d.hide_empty_days = true;
+            let blocks = layout(Screen::History, width, &d).0;
+            let r = blocks
+                .iter()
+                .find(|(_, b)| matches!(b, Block::Toggle { id, on: true, .. } if *id == HIDE_EMPTY_DAYS))
+                .unwrap()
+                .0;
+            assert_eq!(r.y == 0.0, beside, "{width}");
+            assert!(r.right() <= width);
+        }
+        let d = dash(0, 3);
+        let mut h = HistoryView::new(&d);
+        h.hide_empty_days();
+        assert_eq!(h.rows.len(), 2);
+        assert_eq!(h.bars.len(), 3);
+    }
+    #[test]
     fn range_selector_marks_the_active_range() {
         for (range, selected) in [(7, 0), (30, 1), (90, 2)] {
             let mut d = data(0, 7);
@@ -1343,7 +1484,7 @@ mod tests {
         let (blocks, _) = layout(Screen::Settings, 600.0, &d);
         let startup: Vec<_> = blocks
             .iter()
-            .take_while(|(_, b)| !matches!(b, Block::Section("Calories")))
+            .take_while(|(_, b)| !matches!(b, Block::Section("Appearance")))
             .collect();
         assert!(
             startup
@@ -1366,7 +1507,12 @@ mod tests {
                 ("Keep running when closed", true)
             ]
         );
-        assert!(blocks.iter().any(|(_,block)| matches!(block, Block::Note(text) if text.contains("Without weight, calories come from your pad.") && text.contains("Pad readings are always saved."))));
+        assert!(blocks.iter().all(|(_, b)| !matches!(b, Block::Note(t) if t.contains("Pad default sends") || t.contains("Pause retains") || t.contains("Automatic follows"))));
+        assert!(
+            blocks
+                .iter()
+                .any(|(_, b)| matches!(b, Block::Label(t) if t == "Default device"))
+        );
         let sections: Vec<_> = blocks
             .iter()
             .filter_map(|(_, b)| match b {
@@ -1378,7 +1524,6 @@ mod tests {
             sections,
             [
                 "Startup and tray",
-                "Calories",
                 "Appearance",
                 "Device",
                 "Activity recovery",
@@ -1543,7 +1688,45 @@ mod tests {
             fields(&blocks),
             (0..4).map(|i| FIELD_BASE + i).collect::<Vec<_>>()
         );
-        assert_eq!(buttons(&blocks), vec![EFFECTIVE, TARGETS_SAVE]);
+        assert_eq!(
+            buttons(&blocks),
+            vec![EFFECTIVE, WEIGHT_KG, WEIGHT_LB, TARGETS_SAVE]
+        );
+        let unit = |blocks: &[(Rect, Block)]| {
+            blocks
+                .iter()
+                .filter_map(|(_, b)| match b {
+                    Block::Button {
+                        id,
+                        kind: ButtonKind::Selected,
+                        ..
+                    } => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(unit(&blocks), vec![WEIGHT_KG]);
+        let mut lb = d.clone();
+        lb.weight_in_pounds = true;
+        let lb_blocks = layout(Screen::Targets, 400.0, &lb).0;
+        for blocks in [&blocks, &lb_blocks] {
+            let (r, caption) = blocks
+                .iter()
+                .find_map(|(r, b)| match b {
+                    Block::Field {
+                        id: FIELD_BASE,
+                        caption: Some(c),
+                        ..
+                    } => Some((*r, c.clone())),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(note_height(&caption, r.w), 20.0, "{caption} fits one line");
+        }
+        assert_eq!(unit(&lb_blocks), vec![WEIGHT_LB]);
+        assert!(lb_blocks.iter().any(
+            |(_, b)| matches!(b, Block::Field { caption: Some(c), .. } if c.contains("330.7 lb"))
+        ));
         assert!(blocks.iter().any(|(_, b)| matches!(b, Block::Button { id, label, .. } if *id == EFFECTIVE && label == "2026-10-23")));
         let plain = height;
         d.form.errors[2] = Some("Step target must be a whole number.".into());
@@ -1562,11 +1745,14 @@ mod tests {
             with.iter()
                 .any(|(_, b)| matches!(b, Block::Note(t) if t.starts_with("Saved")))
         );
-        // Fields keep the same order and never overlap each other or the Save button.
+        // Inputs keep the same order and never overlap each other or any button.
         let rects: Vec<Rect> = with
             .iter()
-            .filter(|(_, b)| matches!(b, Block::Field { .. } | Block::Button { .. }))
-            .map(|(r, _)| *r)
+            .filter_map(|(r, b)| match b {
+                Block::Field { trailing, .. } => Some(field_frame(*r, *trailing)),
+                Block::Button { .. } => Some(*r),
+                _ => None,
+            })
             .collect();
         for (i, a) in rects.iter().enumerate() {
             for b in &rects[i + 1..] {
@@ -1575,9 +1761,13 @@ mod tests {
                 );
             }
         }
-        let frame = field_frame(Rect::new(0.0, 100.0, 300.0, 80.0));
+        let frame = field_frame(Rect::new(0.0, 100.0, 300.0, 80.0), 0.0);
         assert_eq!(frame, Rect::new(0.0, 120.0, 300.0, 32.0));
-        assert!(field_edit(Rect::new(0.0, 100.0, 300.0, 80.0)).h < 32.0);
+        assert_eq!(
+            field_frame(Rect::new(0.0, 100.0, 300.0, 80.0), 96.0).w,
+            204.0
+        );
+        assert!(field_edit(Rect::new(0.0, 100.0, 300.0, 80.0), 0.0).h < 32.0);
         assert!(
             field_height(Some("Caption"), Some("Error"), 300.0)
                 > field_height(Some("Caption"), None, 300.0)
@@ -1616,7 +1806,7 @@ mod tests {
         field(&mut narrow, end, 200.0, FIELD_BASE + 1, "Steps", None, None);
         assert!(narrow.out[1].0.y >= first.bottom());
         assert_eq!(
-            field_frame(first).h,
+            field_frame(first, 0.0).h,
             32.0,
             "wrapping must not resize the native input"
         );
@@ -1631,7 +1821,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(d.step, "0.5 km/h");
-        assert!(d.device.contains(':'));
+        assert!(d.device.contains(':') && d.device.starts_with("Saved device ("));
         for data in [
             d,
             PageData::from_view(&View {
@@ -1651,7 +1841,43 @@ mod tests {
             )));
         }
         let n = PageData::from_view(&View::default());
-        assert_eq!(n.device, "none selected");
+        assert_eq!(n.device, "None");
+    }
+    #[test]
+    fn start_speed_stepper_runs_from_pad_default_to_six_and_gates_the_remote_option() {
+        assert_eq!(next_start_speed(None, true), Some(10));
+        assert_eq!(next_start_speed(None, false), None);
+        assert_eq!(next_start_speed(Some(10), false), None);
+        assert_eq!(next_start_speed(Some(30), false), Some(29));
+        assert_eq!(next_start_speed(Some(30), true), Some(31));
+        assert_eq!(next_start_speed(Some(60), true), Some(60));
+        assert_eq!(start_speed_label(None), "Pad default");
+        assert_eq!(start_speed_label(Some(35)), "3.5 km/h");
+        let off = PageData::from_view(&View::default());
+        assert!(off.disabled.contains(&START_SPEED_DOWN) && off.disabled.contains(&REMOTE_START));
+        assert!(!off.disabled.contains(&START_SPEED_UP));
+        let top = PageData::from_view(&View {
+            start_speed: crate::application::StartSpeed {
+                target: Some(60),
+                remote: true,
+            },
+            ..Default::default()
+        });
+        assert!(top.disabled.contains(&START_SPEED_UP));
+        assert!(!top.disabled.contains(&REMOTE_START));
+        for width in [600.0, 300.0] {
+            let (blocks, _) = layout(Screen::Settings, width, &top);
+            assert!(blocks.iter().any(|(_, b)| matches!(
+                b,
+                Block::Stepper { name: "Start speed", value, .. } if value == "6.0 km/h"
+            )));
+            assert!(blocks.iter().any(
+                |(_, b)| matches!(b, Block::Toggle { id, on: true, .. } if *id == REMOTE_START)
+            ));
+            assert!(blocks.iter().any(
+                |(_, b)| matches!(b, Block::Note(n) if n.starts_with("Start/Resume then sets 6.0"))
+            ));
+        }
     }
     #[test]
     fn bar_slots_follow_the_chart_block() {

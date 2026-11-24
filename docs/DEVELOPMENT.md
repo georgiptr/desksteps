@@ -48,7 +48,8 @@ launches share this location. Development mode rejects `--database`, `--portable
 `--device` and `--replay` overrides. It never imports personal history. First
 launch creates seven days of synthetic history and example targets/weight;
 later launches preserve it. **Reset development data…** explicitly restores
-the sample dataset after confirmation. Nothing deletes normal history.
+the sample dataset after confirmation. Older seeded days are compacted like
+normal history, which exercises the summary read path.
 
 Development global shortcuts are disabled by default, even if bindings are
 saved. To test them, use **Toggle development shortcuts** in the Simulator panel

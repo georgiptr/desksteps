@@ -196,7 +196,16 @@ fn native_ui_screenshots_of_targets_settings_and_calories() {
     raw.lock().unwrap().selected = Some(1);
     raw.lock().unwrap().selected_name = Some("Synthetic saved WalkingPad".into());
     raw.lock().unwrap().totals.day = "2026-10-23".into();
+    raw.lock().unwrap().status = "Connected; Stopped".into();
+    raw.lock().unwrap().connected = true;
+    raw.lock().unwrap().candidates = vec![crate::application::Candidate {
+        address: 1,
+        name: "Synthetic saved WalkingPad".into(),
+    }];
     let mut dashboard = dash("2026-10-23", 7);
+    for (i, day) in dashboard.days.iter_mut().enumerate() {
+        day.steps = if i % 3 == 1 { 0 } else { 1200 + i as i64 * 300 };
+    }
     dashboard.day.preferences = crate::statistics::Preferences {
         weight: Some(80.0),
         steps: Some(2000),
@@ -231,7 +240,8 @@ fn native_ui_screenshots_of_targets_settings_and_calories() {
                 SWP_NOMOVE | SWP_NOZORDER,
             )
             .unwrap();
-            for page in [Page::Targets, Page::Settings, Page::Today] {
+            for page in [Page::Targets, Page::Settings, Page::Today, Page::History] {
+                s.range.set(7);
                 select_page(window, s, page);
                 s.scroll.set([0.0; 5]);
                 s.refresh(window);
@@ -245,6 +255,16 @@ fn native_ui_screenshots_of_targets_settings_and_calories() {
                         forms::put_text(s, FIELD_BASE, "80");
                         forms::put_text(s, FIELD_BASE + 1, "2000");
                         s.form.borrow_mut().errors = Default::default();
+                        activate(window, s, pages::WEIGHT_LB, false);
+                        capture(window, &folder.join(format!("Targets-pounds-{name}.bmp")));
+                        activate(window, s, pages::WEIGHT_KG, false);
+                    }
+                    Page::History => {
+                        raw.lock().unwrap().hide_empty_days = true;
+                        SendMessageW(window, UPDATE, None, None);
+                        capture(window, &folder.join(format!("History-hidden-{name}.bmp")));
+                        raw.lock().unwrap().hide_empty_days = false;
+                        SendMessageW(window, UPDATE, None, None);
                     }
                     Page::Settings => {
                         raw.lock().unwrap().theme_preference =
@@ -276,6 +296,47 @@ fn native_ui_screenshots_of_targets_settings_and_calories() {
                             v.window_behavior = Default::default();
                         }
                         SendMessageW(window, UPDATE, None, None);
+                        let device = s
+                            .scene
+                            .borrow()
+                            .blocks
+                            .iter()
+                            .find_map(|(r, b)| {
+                                matches!(b, pages::Block::Section("Device")).then_some(r.y)
+                            })
+                            .unwrap();
+                        scroll_by(window, s, device);
+                        capture(window, &folder.join(format!("Settings-device-{name}.bmp")));
+                        s.scroll.set([0.0; 5]);
+                        s.refresh(window);
+                        // Controls: Pad default (remote option unavailable), then a set speed.
+                        let controls = s
+                            .scene
+                            .borrow()
+                            .blocks
+                            .iter()
+                            .find_map(|(r, b)| {
+                                matches!(b, pages::Block::Section("Controls")).then_some(r.y)
+                            })
+                            .unwrap();
+                        scroll_by(window, s, controls);
+                        capture(
+                            window,
+                            &folder.join(format!("Settings-start-default-{name}.bmp")),
+                        );
+                        raw.lock().unwrap().start_speed = crate::application::StartSpeed {
+                            target: Some(30),
+                            remote: true,
+                        };
+                        SendMessageW(window, UPDATE, None, None);
+                        capture(
+                            window,
+                            &folder.join(format!("Settings-start-set-{name}.bmp")),
+                        );
+                        raw.lock().unwrap().start_speed = Default::default();
+                        SendMessageW(window, UPDATE, None, None);
+                        s.scroll.set([0.0; 5]);
+                        s.refresh(window);
                         s.form.borrow_mut().shortcut_errors[1] =
                             Some("Shortcuts require at least two of Ctrl, Alt and Shift".into());
                         s.refresh(window);
@@ -305,7 +366,6 @@ fn native_ui_screenshots_of_targets_settings_and_calories() {
                             .preferences
                             .weight = Some(80.0);
                     }
-                    _ => unreachable!(),
                 }
             }
         }

@@ -4,6 +4,7 @@ impl Runtime<'_> {
     pub(super) fn check_recording(&mut self) -> Result<(), String> {
         if Instant::now() >= self.next_session_check {
             self.store.expire_sessions(self.utc_now())?;
+            let _ = self.store.compact(self.utc_now());
             self.next_session_check = Instant::now() + Duration::from_secs(60);
         }
         if self

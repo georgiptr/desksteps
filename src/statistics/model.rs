@@ -40,14 +40,14 @@ pub fn date(value: &str) -> Result<NaiveDate, String> {
     }
     Ok(d)
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PadCalories {
     pub total: Option<f64>,
     pub incomplete: bool,
     pub recovered: Option<f64>,
     pub recovery_missing: bool,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Day {
     pub date: String,
     pub steps: i64,
@@ -91,7 +91,7 @@ impl Day {
         }
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {
     pub id: i64,
     pub start: String,
@@ -107,7 +107,7 @@ pub struct Session {
     pub recovered_kcal: Option<f64>,
     pub recovery_kcal_missing: bool,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dashboard {
     pub day: Day,
     pub days: Vec<Day>,

@@ -86,6 +86,14 @@ impl Runtime<'_> {
                 let eligible = self.link.as_ref().is_some_and(|l| l.generation == raw_gen);
                 if eligible && kind == "notification" && uuid == MACHINE_STATUS && bytes == [0x04] {
                     self.telemetry_watch.started(raw_gen, Instant::now());
+                    self.controls.machine_started(raw_gen, mono);
+                }
+                if eligible
+                    && kind == "notification"
+                    && uuid == TRAINING_STATUS
+                    && bytes.first() == Some(&0x03)
+                {
+                    self.controls.countdown(raw_gen, mono);
                 }
                 let sample = if eligible {
                     decoded.as_ref().and_then(|r| r.as_ref().ok())
@@ -136,9 +144,9 @@ impl Runtime<'_> {
                     v.speed = sample.speed_kmh;
                     v.device_steps = sample.steps;
                     self.status = if sample.speed_kmh.is_some_and(|s| s > 0.0) {
-                        "Walking: recording".into()
+                        "Connected; Walking".into()
                     } else {
-                        "Connected: belt stopped in last sample".into()
+                        "Connected; Stopped".into()
                     };
                 } else if decoded.as_ref().is_some_and(|r| r.is_err()) {
                     self.view.lock().unwrap().error =

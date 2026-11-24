@@ -68,14 +68,11 @@ pub(crate) fn replay_file(
             decoded.as_ref().and_then(|r| r.as_ref().ok()),
         )? as u32;
     }
-    // Deliberately report validation counts, not personal workout totals.
-    std::fs::write(
-        db.with_extension("replay-report.json"),
-        serde_json::to_vec_pretty(
-            &serde_json::json!({"inserted_events":inserted,"decode_errors":errors}),
-        )
-        .unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+    // Deliberately report validation counts, not personal workout totals. The
+    // report goes to standard output only; nothing is left beside the database.
+    println!(
+        "{}",
+        serde_json::json!({"inserted_events":inserted,"decode_errors":errors})
+    );
     Ok(())
 }

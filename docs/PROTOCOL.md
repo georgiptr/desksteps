@@ -118,6 +118,8 @@ still wait for their matching indications and motion. This rapid-write behavior
 is an application policy verified offline, not a device-validated remote protocol
 or a claim that the firmware accepts every rapid command.
 
+The optional start-speed setting is application policy, not a device feature: Start (`07`) carries no speed. After Start/Resume is confirmed by fresh moving telemetry, or after a start this client did not command on the current connection (a stopped-to-moving change, or a Training Status countdown followed within 10 s by Machine Status `04`), DeskSteps waits about 2 seconds of measured motion. It then sends at most one absolute Set speed through the same serialized control transaction, without retrying. In the owner's recorded history, all 39 `04` notifications came within 10 s after a countdown, and connections to an already-moving belt produced neither. After connecting, the tested pad sent no Treadmill Data while idle, so the first sample of a remote start was already moving. Only the simulator verifies the resulting speed command offline.
+
 Machine Status observations: `04` started/resumed, `02 02` paused, `02 01` stopped. Upstream target-speed status `05 LL HH` was not emitted for tested speed changes; use Treadmill Data rather than requiring that status. Training Status supplied a 3/2/1/0 countdown before one Start; do not treat countdown/status as physical movement confirmation.
 
 Resume retained nonzero counters but selected 1.0 after a 3.0 workout. Counter retention does not imply speed retention. Stop produced no retained nonzero treadmill total after the command in the tested observation window: persist the pre-Stop progress rather than expecting a final old-counter packet. Archived-history effects are unknown.

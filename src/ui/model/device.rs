@@ -35,6 +35,14 @@ pub fn choices(view: &View) -> Vec<(u64, String)> {
     }
     choices
 }
+/// Name and address of the saved device, as the device list shows it.
+pub fn selected_label(view: &View) -> Option<String> {
+    let selected = view.selected?;
+    choices(view)
+        .into_iter()
+        .find(|(a, _)| *a == selected)
+        .map(|(_, label)| label)
+}
 /// Connection commands are available unless this is a Bluetooth-free preview.
 pub fn available(view: &View) -> bool {
     !view.no_bluetooth || view.development
